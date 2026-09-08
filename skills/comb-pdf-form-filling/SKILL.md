@@ -9,6 +9,14 @@ metadata:
 
 # Comb-box PDF form filling
 
+## What a comb field is
+
+A **comb field** prints one open box per character, so the form expects one glyph per box. Filling it as an ordinary text field puts a continuous string over the top and the characters land across the dividers, which is what an authority rejects:
+
+![A comb field filled wrongly as one continuous string, and filled correctly with one glyph centred per box](assets/comb-field-wrong-vs-right.png)
+
+Both rows above hold the same value in the same field. The top one is what you get by default; the bottom one is what this skill produces. Regenerate the image with [`scripts/make_example_images.py`](scripts/make_example_images.py).
+
 ## Overview
 
 Fill an official form so it looks typed by a clerk: every character sits **inside** its printed box, identifying numbers (IBAN, tax number, BIC) are unambiguous, and the result prints the same everywhere. Two principles carry the whole skill:

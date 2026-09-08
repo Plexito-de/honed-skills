@@ -10,6 +10,10 @@ The Agent Skills format is an open, cross-agent spec, so nothing here is tied to
 | --- | --- |
 | [`comb-pdf-form-filling`](skills/comb-pdf-form-filling/) | An official PDF form has to be filled so that each character lands inside its own printed box (a comb field): IBAN, tax number, BIC, dates. Built against German Behörden, tax and bank forms, and applies to any AcroForm or flat PDF with printed boxes. |
 
+A comb field prints one box per character, and filling it as an ordinary text field puts the string across the dividers. Same value, same field, both ways:
+
+![A comb field filled wrongly as one continuous string, and filled correctly with one glyph centred per box](skills/comb-pdf-form-filling/assets/comb-field-wrong-vs-right.png)
+
 ## Install
 
 Copy the skill folder into your agent's skills directory. Name the destination explicitly:
