@@ -277,6 +277,13 @@ function edits() {
 const ordered = () => [...marks, ...comments].sort((a,b) => a.id - b.id);
 const numberOf = m => ordered().findIndex(x => x.id === m.id) + 1;
 
+function setActive(id) {
+  activeId = id;
+  document.querySelectorAll("#feed .card").forEach(c =>
+    c.classList.toggle("active", c.id === `fb-${id}`));
+  redraw();                       // the canvas draws the active mark differently
+}
+
 function renderFeed() {
   const host = document.getElementById("feed");
   const list = ordered(), eds = edits();
@@ -301,7 +308,10 @@ function renderFeed() {
       marks = marks.filter(x => x !== m); comments = comments.filter(x => x !== m);
       renderFeed(); redraw();
     };
-    el.onclick = () => { activeId = m.id; renderFeed(); };
+    // Selecting a card must NOT re-render the feed. renderFeed() rebuilds every card from
+    // innerHTML, so a click inside the textarea destroyed the element it had just focused and
+    // the caret vanished on the first click. Toggle the class on the live nodes instead.
+    el.onclick = () => setActive(m.id);
     host.append(el);
   });
   eds.forEach(e => {
