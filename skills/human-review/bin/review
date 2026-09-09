@@ -1,0 +1,440 @@
+#!/usr/bin/env python3
+"""review: one page where the reviewer marks up text AND media, and sends it all back at once.
+
+WHY THIS EXISTS RATHER THAN A FORK
+----------------------------------
+Upstream human-review (MIT, Peter Yang) reviews text well and cannot annotate an image. Vendoring
+it means owning 6747 lines of Node across 19 files, losing the `npx` update path, and still bolting
+media on afterwards. Two small ideas from it are worth having, and they are ported here with
+attribution rather than the whole runtime: prefix/quote/suffix anchoring for a selection, and
+block-level before/after edit extraction.
+
+What this adds that neither half had: a draft is rarely only prose or only a picture. An invitation
+is a rendered card AND its copy. A post is text AND its hero image. Splitting the review across two
+tools splits the reviewer's attention and costs a round every time.
+
+DESIGN
+------
+- Python standard library only. No pip, no npm, no Node, works offline.
+- The browser renders the marked-up overview and cuts one crop per mark, so this file needs no
+  image library at all.
+- Sessions live in ~/.claude/.review/<id>/ and hold everything the agent reads back.
+
+USAGE
+  review open draft.md card.png form.pdf     stage anything, open the page, return at once
+  review poll [--session ID] [--ack]         block until Send, print the batch as JSON
+  review status [--session ID]               is a batch waiting
+  review close [--session ID]                stop the server
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import html as html_mod
+import http.server
+import json
+import os
+import re
+import shutil
+import signal
+import socketserver
+import subprocess
+import sys
+import threading
+import time
+import webbrowser
+from pathlib import Path
+
+ROOT = Path.home() / ".claude" / ".review"
+APP = Path(__file__).resolve().parent.parent / "assets" / "review.html"
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+TEXT_SUFFIXES = {".md", ".markdown", ".html", ".htm", ".txt"}
+
+
+# --------------------------------------------------------------------------- markdown
+def render_markdown(src: str) -> str:
+    """A deliberately small Markdown subset: headings, lists, quotes, code, tables, emphasis.
+
+    Full CommonMark would mean a dependency. Everything he reviews here is a draft he wrote or
+    that I wrote for him, so the subset that appears in those drafts is the subset that matters.
+    Anything unrecognised survives as a paragraph rather than disappearing.
+    """
+    def inline(t: str) -> str:
+        t = html_mod.escape(t)
+        t = re.sub(r"`([^`]+)`", r"<code>\1</code>", t)
+        t = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", t)
+        t = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"<em>\1</em>", t)
+        t = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', t)
+        return t
+
+    out: list[str] = []
+    lines = src.splitlines()
+    i, n = 0, len(lines)
+    while i < n:
+        line = lines[i]
+        if not line.strip():
+            i += 1
+            continue
+        if line.startswith("```"):                                   # fenced code
+            i += 1
+            buf = []
+            while i < n and not lines[i].startswith("```"):
+                buf.append(lines[i]); i += 1
+            i += 1
+            out.append("<pre><code>" + html_mod.escape("\n".join(buf)) + "</code></pre>")
+            continue
+        m = re.match(r"^(#{1,6})\s+(.*)$", line)
+        if m:
+            lvl = len(m.group(1))
+            out.append(f"<h{lvl}>{inline(m.group(2))}</h{lvl}>"); i += 1
+            continue
+        if re.match(r"^\s*([-*_])\1{2,}\s*$", line):
+            out.append("<hr>"); i += 1
+            continue
+        if line.lstrip().startswith("|") and i + 1 < n and re.match(r"^\s*\|[\s:|-]+\|\s*$", lines[i+1]):
+            rows = []
+            while i < n and lines[i].lstrip().startswith("|"):
+                rows.append([c.strip() for c in lines[i].strip().strip("|").split("|")]); i += 1
+            head, body = rows[0], rows[2:]
+            cells = "".join(f"<th>{inline(c)}</th>" for c in head)
+            trs = "".join("<tr>" + "".join(f"<td>{inline(c)}</td>" for c in r) + "</tr>" for r in body)
+            out.append(f"<table><thead><tr>{cells}</tr></thead><tbody>{trs}</tbody></table>")
+            continue
+        if re.match(r"^\s*>", line):
+            buf = []
+            while i < n and re.match(r"^\s*>", lines[i]):
+                buf.append(re.sub(r"^\s*>\s?", "", lines[i])); i += 1
+            out.append("<blockquote>" + inline(" ".join(buf)) + "</blockquote>")
+            continue
+        if re.match(r"^\s*[-*+]\s+", line) or re.match(r"^\s*\d+[.)]\s+", line):
+            ordered = bool(re.match(r"^\s*\d+[.)]\s+", line))
+            items = []
+            pat = r"^\s*\d+[.)]\s+" if ordered else r"^\s*[-*+]\s+"
+            while i < n and re.match(pat, lines[i]):
+                items.append(inline(re.sub(pat, "", lines[i]))); i += 1
+            tag = "ol" if ordered else "ul"
+            out.append(f"<{tag}>" + "".join(f"<li>{x}</li>" for x in items) + f"</{tag}>")
+            continue
+        buf = []
+        while i < n and lines[i].strip() and not lines[i].startswith(("#", "```", ">", "|")):
+            buf.append(lines[i]); i += 1
+        out.append("<p>" + inline(" ".join(buf)) + "</p>")
+    return "\n".join(out)
+
+
+def html_body(src: str) -> str:
+    """Take the body of an HTML document, minus scripts, so the review page stays in control."""
+    m = re.search(r"<body[^>]*>(.*)</body>", src, re.S | re.I)
+    body = m.group(1) if m else src
+    body = re.sub(r"<script\b.*?</script>", "", body, flags=re.S | re.I)
+    return body
+
+
+# --------------------------------------------------------------------------- session
+def session_id(paths: list[Path]) -> str:
+    key = "|".join(str(p.resolve()) for p in sorted(paths))
+    return hashlib.sha1(key.encode()).hexdigest()[:12]
+
+
+def latest_session() -> Path | None:
+    if not ROOT.exists():
+        return None
+    live = [d for d in ROOT.iterdir() if d.is_dir() and (d / "items.json").exists()]
+    return max(live, key=lambda d: d.stat().st_mtime) if live else None
+
+
+def resolve_session(arg: str | None) -> Path:
+    if arg:
+        d = ROOT / arg if not Path(arg).is_absolute() else Path(arg)
+        if d.is_dir():
+            return d
+        sys.exit(f"no such session: {arg}")
+    d = latest_session()
+    if not d:
+        sys.exit("no review session yet; run: review open <file>")
+    return d
+
+
+def pdf_to_pngs(pdf: Path, out_dir: Path) -> list[Path]:
+    if shutil.which("pdftoppm"):
+        subprocess.run(["pdftoppm", "-r", "130", "-png", str(pdf), str(out_dir / pdf.stem)],
+                       check=True, capture_output=True)
+        return sorted(out_dir.glob(f"{pdf.stem}*.png"))
+    if shutil.which("sips"):                       # macOS fallback, first page only
+        out = out_dir / f"{pdf.stem}.png"
+        subprocess.run(["sips", "-s", "format", "png", str(pdf), "--out", str(out)],
+                       check=True, capture_output=True)
+        return [out]
+    print(f"skipping {pdf.name}: no pdftoppm and no sips to render it", file=sys.stderr)
+    return []
+
+
+def stage_inputs(paths: list[Path], sess: Path) -> list[dict]:
+    adir = sess / "assets"
+    adir.mkdir(parents=True, exist_ok=True)
+    items: list[dict] = []
+    for src in paths:
+        if not src.exists():
+            sys.exit(f"no such file: {src}")
+        suffix = src.suffix.lower()
+        if suffix == ".pdf":
+            for page in pdf_to_pngs(src, adir):
+                items.append({"kind": "media", "id": re.sub(r"\W+", "_", page.stem),
+                              "name": page.name, "url": f"/asset/{page.name}",
+                              "source": str(src.resolve())})
+            continue
+        if suffix in IMAGE_SUFFIXES:
+            dest = adir / src.name
+            if src.resolve() != dest.resolve():
+                shutil.copy2(src, dest)
+            items.append({"kind": "media", "id": re.sub(r"\W+", "_", dest.stem),
+                          "name": dest.name, "url": f"/asset/{dest.name}",
+                          "source": str(src.resolve())})
+            continue
+        if suffix in TEXT_SUFFIXES:
+            raw = src.read_text(errors="replace")
+            if suffix in (".html", ".htm"):
+                body, fmt = html_body(raw), "html"
+            elif suffix == ".txt":
+                body = "".join(f"<p>{html_mod.escape(p)}</p>"
+                               for p in re.split(r"\n\s*\n", raw) if p.strip())
+                fmt = "text"
+            else:
+                body, fmt = render_markdown(raw), "markdown"
+            items.append({"kind": "text", "id": re.sub(r"\W+", "_", src.stem),
+                          "name": src.name, "format": fmt, "html": body,
+                          "source": str(src.resolve())})
+            continue
+        print(f"skipping {src.name}: reviewable types are images, PDF, Markdown, HTML, txt",
+              file=sys.stderr)
+    if not items:
+        sys.exit("nothing to review among the given files")
+    (sess / "items.json").write_text(json.dumps(items, indent=2))
+    return items
+
+
+# --------------------------------------------------------------------------- batch
+def write_outputs(sess: Path, payload: dict) -> dict:
+    crops_dir = sess / "crops"
+    crops_dir.mkdir(exist_ok=True)
+    try:
+        sources = {i["name"]: i.get("source") for i in json.loads((sess / "items.json").read_text())}
+    except (OSError, ValueError):
+        sources = {}
+
+    lines = ["# Review", ""]
+    pages_out = []
+    for page in payload.get("pages", []):
+        name = page["name"]
+        src = sources.get(name)
+        entry = {"kind": page["kind"], "name": name, "source": src}
+        lines += [f"## {name}", ""]
+        if src:
+            lines.append(f"Original: `{src}`")
+
+        if page["kind"] == "media":
+            stem = re.sub(r"\W+", "_", Path(name).stem)
+            over = sess / f"overview_{stem}.png"
+            over.write_bytes(base64.b64decode(page["overview_png"].split(",", 1)[1]))
+            by_id = {c["mark"]: c for c in page.get("crops", [])}
+            lines += [f"Overview: `{over}`", ""]
+            marks = []
+            for c in page["comments"]:
+                crop = crops_dir / f"{stem}_mark_{c['number']:02d}.png"
+                raw = by_id.get(int(c["id"].split("_")[1]), {}).get("png")
+                if raw:
+                    crop.write_bytes(base64.b64decode(raw.split(",", 1)[1]))
+                marks.append({"id": c["id"], "number": c["number"], "tool": c["tool"],
+                              "note": c["note"].strip(), "box": c["box"],
+                              "crop": str(crop) if raw else None})
+                lines.append(f"{c['number']}. ({c['tool']}) {c['note'].strip() or '[no text]'}")
+                if raw:
+                    lines.append(f"   crop: `{crop}`")
+            entry.update({"overview": str(over), "marks": marks})
+        else:
+            comments, edits = [], []
+            for c in page.get("comments", []):
+                comments.append({"id": c["id"], "number": c["number"], "quote": c["quote"],
+                                 "anchor": c.get("anchor", {}), "block": c.get("block"),
+                                 "note": c["note"].strip()})
+                lines.append(f"{c['number']}. \"{c['quote'][:70]}\" -> {c['note'].strip() or '[no text]'}")
+            for e in page.get("edits", []):
+                edits.append({"block": e.get("block"), "label": e.get("label"),
+                              "before": e["before"], "after": e["after"]})
+                lines.append(f"EDIT [{e.get('label') or e.get('block')}]")
+                lines.append(f"   before: {e['before'][:110]}")
+                lines.append(f"   after:  {e['after'][:110]}")
+            entry.update({"comments": comments, "edits": edits, "edits_saved": False})
+        lines.append("")
+        pages_out.append(entry)
+
+    batch = {"status": "feedback", "session": sess.name, "pages": pages_out,
+             "overall_note": payload.get("overall_note", "").strip(),
+             "received_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    if batch["overall_note"]:
+        lines += ["## Overall", "", batch["overall_note"], ""]
+    (sess / "marks.md").write_text("\n".join(lines))
+    (sess / "batch.json").write_text(json.dumps(batch, indent=2, ensure_ascii=False))
+    # Receipt: a fact other gates can read, instead of a claim that he looked.
+    (sess / "receipt.json").write_text(json.dumps(
+        {"reviewed_at": batch["received_at"],
+         "files": [p["source"] for p in pages_out if p.get("source")],
+         "items": sum(len(p.get("marks", [])) + len(p.get("comments", [])) + len(p.get("edits", []))
+                      for p in pages_out)}, indent=2))
+    return batch
+
+
+# --------------------------------------------------------------------------- server
+def serve(sess: Path, items: list[dict]) -> None:
+    app = APP.read_text()
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *_a):
+            pass
+
+        def _send(self, code, body: bytes, ctype="text/html; charset=utf-8"):
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            if self.path in ("/", "/index.html"):
+                page = app.replace("<script>",
+                                   "<script>window.__SESSION__=%s;window.__ITEMS__=%s;</script><script>"
+                                   % (json.dumps(sess.name), json.dumps(items)), 1)
+                return self._send(200, page.encode())
+            if self.path.startswith("/asset/"):
+                f = sess / "assets" / Path(self.path[len("/asset/"):]).name
+                if not f.exists():
+                    return self._send(404, b"not found", "text/plain")
+                ctype = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                         ".gif": "image/gif", ".webp": "image/webp"}.get(f.suffix.lower(),
+                                                                        "application/octet-stream")
+                return self._send(200, f.read_bytes(), ctype)
+            self._send(404, b"not found", "text/plain")
+
+        def do_POST(self):
+            if self.path != "/send":
+                return self._send(404, b"not found", "text/plain")
+            n = int(self.headers.get("Content-Length", 0))
+            write_outputs(sess, json.loads(self.rfile.read(n) or b"{}"))
+            self._send(200, b'{"ok":true}', "application/json")
+            threading.Timer(0.6, lambda: os.kill(os.getpid(), signal.SIGTERM)).start()
+
+    with socketserver.TCPServer(("127.0.0.1", 0), Handler) as httpd:
+        (sess / "url").write_text(f"http://127.0.0.1:{httpd.server_address[1]}/")
+        (sess / "server.pid").write_text(str(os.getpid()))
+        httpd.serve_forever()
+
+
+# --------------------------------------------------------------------------- commands
+def cmd_open(args) -> int:
+    paths = [Path(p).expanduser() for p in args.files]
+    sess = ROOT / session_id(paths)
+    sess.mkdir(parents=True, exist_ok=True)
+    for stale in ("batch.json", "url", "server.pid", "receipt.json"):
+        (sess / stale).unlink(missing_ok=True)
+    items = stage_inputs(paths, sess)
+
+    if os.fork() > 0:
+        for _ in range(100):
+            if (sess / "url").exists():
+                break
+            time.sleep(0.05)
+        url = (sess / "url").read_text().strip() if (sess / "url").exists() else "(not started)"
+        kinds = ", ".join(f"{sum(1 for i in items if i['kind'] == k)} {k}"
+                          for k in ("text", "media") if any(i["kind"] == k for i in items))
+        print(f"Reviewing {kinds} as session {sess.name}")
+        print(url)
+        if shutil.which("clip-put"):               # the URL belongs on his clipboard, not only here
+            subprocess.run(["clip-put"], input=url, text=True, capture_output=True)
+        print("\nWaiting for feedback? Run this in the background; it exits when he hits Send:")
+        print(f"  review poll --session {sess.name}")
+        if not args.no_browser:
+            webbrowser.open(url)
+        return 0
+
+    os.setsid()
+    log = os.open(str(sess / "server.log"), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    devnull = os.open(os.devnull, os.O_RDONLY)
+    os.dup2(devnull, 0); os.dup2(log, 1); os.dup2(log, 2)
+    serve(sess, items)
+    return 0
+
+
+def cmd_poll(args) -> int:
+    sess = resolve_session(args.session)
+    batch = sess / "batch.json"
+    deadline = time.time() + args.timeout if args.timeout else None
+    while True:
+        if batch.exists():
+            print(json.dumps(json.loads(batch.read_text()), indent=2, ensure_ascii=False))
+            if args.ack:
+                batch.unlink()
+            return 0
+        pid_file = sess / "server.pid"
+        if pid_file.exists():
+            try:
+                os.kill(int(pid_file.read_text()), 0)
+            except (ProcessLookupError, ValueError):
+                print(json.dumps({"status": "closed", "reason": "review window was closed"}))
+                return 0
+        if deadline and time.time() > deadline:
+            print(json.dumps({"status": "timeout"}))
+            return 0
+        time.sleep(0.5)
+
+
+def cmd_status(args) -> int:
+    sess = resolve_session(args.session)
+    print(json.dumps({"status": "feedback-waiting" if (sess / "batch.json").exists() else "empty",
+                      "session": sess.name,
+                      "url": (sess / "url").read_text().strip() if (sess / "url").exists() else None}))
+    return 0
+
+
+def cmd_close(args) -> int:
+    sess = resolve_session(args.session)
+    pid_file = sess / "server.pid"
+    if pid_file.exists():
+        try:
+            os.kill(int(pid_file.read_text()), signal.SIGTERM)
+        except (ProcessLookupError, ValueError):
+            pass
+        pid_file.unlink(missing_ok=True)
+    print(json.dumps({"status": "closed", "session": sess.name}))
+    return 0
+
+
+def cmd_selftest(_args) -> int:
+    md = render_markdown("# H\n\ntext **b** and `c`\n\n- one\n- two\n\n> quote\n")
+    assert "<h1>H</h1>" in md and "<strong>b</strong>" in md and "<li>one</li>" in md, md
+    assert "<blockquote>quote</blockquote>" in md, md
+    body = html_body("<html><body><p>keep</p><script>drop()</script></body></html>")
+    assert "keep" in body and "drop" not in body, body
+    tbl = render_markdown("| a | b |\n|---|---|\n| 1 | 2 |\n")
+    assert "<th>a</th>" in tbl and "<td>2</td>" in tbl, tbl
+    print("selftest ok: markdown subset, html body extraction, table")
+    return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="review", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    o = sub.add_parser("open"); o.add_argument("files", nargs="+")
+    o.add_argument("--no-browser", action="store_true"); o.set_defaults(fn=cmd_open)
+    p = sub.add_parser("poll"); p.add_argument("--session"); p.add_argument("--ack", action="store_true")
+    p.add_argument("--timeout", type=float, default=0); p.set_defaults(fn=cmd_poll)
+    s = sub.add_parser("status"); s.add_argument("--session"); s.set_defaults(fn=cmd_status)
+    c = sub.add_parser("close"); c.add_argument("--session"); c.set_defaults(fn=cmd_close)
+    t = sub.add_parser("selftest"); t.set_defaults(fn=cmd_selftest)
+    args = ap.parse_args()
+    return args.fn(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

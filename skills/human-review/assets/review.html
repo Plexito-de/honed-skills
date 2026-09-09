@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Review</title>
+<style>
+:root{--ink:#16202c;--mut:#5d6b7c;--line:#dbe2ea;--acc:#c8321e;--bg:#f2f5f8;--paper:#fff}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font:15.5px/1.6 -apple-system,"Helvetica Neue",sans-serif;color:var(--ink);background:var(--bg);
+     display:flex;flex-direction:column;height:100vh;overflow:hidden}
+
+header{display:flex;align-items:center;gap:10px;padding:10px 16px;background:var(--paper);
+       border-bottom:1px solid var(--line);flex:none}
+header h1{font-size:15px;font-weight:600;margin-right:auto}
+header .grp{display:flex;gap:6px;align-items:center}
+header .lbl{font-size:12px;color:var(--mut);margin-right:2px}
+.btn{border:1px solid var(--line);background:var(--paper);border-radius:8px;padding:6px 11px;
+     font:inherit;font-size:14px;cursor:pointer}
+.btn[aria-pressed="true"]{background:var(--ink);color:#fff;border-color:var(--ink)}
+.send{background:#1f6f3f;color:#fff;border:0;border-radius:8px;padding:9px 20px;font:inherit;
+      font-weight:600;cursor:pointer}
+
+main{display:flex;flex:1;min-height:0}
+#stage{flex:1;overflow:auto;padding:26px 26px 120px;display:flex;flex-direction:column;
+       align-items:center;gap:34px}
+.item{width:100%;max-width:860px}
+.item > .cap{font-size:12.5px;color:var(--mut);margin-bottom:8px;display:flex;gap:8px;align-items:center}
+.kindtag{border:1px solid var(--line);border-radius:20px;padding:1px 9px;font-size:11px;
+         letter-spacing:.06em;text-transform:uppercase;color:var(--mut);background:var(--paper)}
+
+/* media */
+.media{position:relative;background:var(--paper);border-radius:8px;line-height:0;
+       box-shadow:0 6px 26px rgba(20,30,50,.13)}
+.media img{display:block;width:100%;height:auto;border-radius:8px}
+.media canvas{position:absolute;inset:0;width:100%;height:100%;cursor:crosshair;border-radius:8px}
+
+/* text */
+.doc{background:var(--paper);border-radius:8px;padding:34px 40px;box-shadow:0 6px 26px rgba(20,30,50,.10)}
+.doc h1{font-size:29px;margin:.2em 0 .5em;letter-spacing:-.02em}
+.doc h2{font-size:22px;margin:1.4em 0 .5em}
+.doc h3{font-size:18px;margin:1.3em 0 .45em}
+.doc p,.doc li{margin-bottom:.75em}
+.doc ul,.doc ol{padding-left:1.4em;margin-bottom:.8em}
+.doc blockquote{border-left:4px solid var(--line);padding-left:14px;color:var(--mut);margin:.8em 0}
+.doc pre{background:#f5f7fa;border-radius:8px;padding:12px 14px;overflow:auto;margin-bottom:.9em}
+.doc code{font:13.5px/1.5 ui-monospace,Menlo,monospace}
+.doc table{border-collapse:collapse;margin-bottom:1em;width:100%}
+.doc th,.doc td{border:1px solid var(--line);padding:6px 9px;text-align:left;font-size:14px}
+.doc img{max-width:100%;height:auto;border-radius:6px}
+[data-blk]{outline:0;border-radius:5px;transition:background .12s}
+[data-blk]:focus{background:#fffbe9;box-shadow:0 0 0 3px rgba(210,170,40,.18)}
+[data-blk].touched{background:#fff7dd}
+
+/* sidebar */
+aside{width:390px;flex:none;background:var(--paper);border-left:1px solid var(--line);overflow:auto;
+      padding:16px 16px 96px}
+aside h2{font-size:11.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--mut);margin:8px 0 10px}
+.card{border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:10px}
+.card.active{border-color:var(--acc);box-shadow:0 0 0 3px rgba(200,50,30,.10)}
+.card .top{display:flex;align-items:center;gap:8px;margin-bottom:7px}
+.badge{width:23px;height:23px;border-radius:50%;background:var(--acc);color:#fff;font-size:12.5px;
+       font-weight:700;display:flex;align-items:center;justify-content:center;flex:none}
+.badge.edit{background:#8a6d1f}
+.card .where{font-size:12px;color:var(--mut);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.card .quote{font-size:13px;color:var(--mut);font-style:italic;margin-bottom:6px;
+             border-left:3px solid var(--line);padding-left:8px}
+.card textarea{width:100%;border:1px solid var(--line);border-radius:7px;padding:7px 8px;font:inherit;
+               font-size:14px;resize:vertical;min-height:52px}
+.card .del{border:0;background:none;color:var(--mut);cursor:pointer;font-size:16px;line-height:1}
+.diff{font:12.5px/1.45 ui-monospace,Menlo,monospace}
+.diff .b{color:#a2352a;text-decoration:line-through}
+.diff .a{color:#1f6f3f}
+#overall{width:100%;border:1px solid var(--line);border-radius:7px;padding:8px;font:inherit;
+         min-height:66px;resize:vertical}
+.empty{color:var(--mut);font-size:13px;padding:6px 2px 12px}
+footer{position:fixed;right:0;bottom:0;width:390px;background:var(--paper);border-top:1px solid var(--line);
+       border-left:1px solid var(--line);padding:12px 16px;display:flex;gap:10px;align-items:center}
+#status{font-size:13px;color:var(--mut)}
+#selbtn{position:fixed;z-index:50;display:none;background:var(--ink);color:#fff;border:0;
+        border-radius:7px;padding:6px 11px;font:inherit;font-size:13px;cursor:pointer;
+        box-shadow:0 4px 14px rgba(0,0,0,.2)}
+</style></head><body>
+
+<header>
+  <h1>Review</h1>
+  <span class="grp"><span class="lbl">Image</span>
+    <button class="btn tool" data-tool="ellipse" aria-pressed="true">Circle</button>
+    <button class="btn tool" data-tool="rect" aria-pressed="false">Box</button>
+    <button class="btn tool" data-tool="free" aria-pressed="false">Freehand</button>
+    <button class="btn tool" data-tool="arrow" aria-pressed="false">Arrow</button>
+  </span>
+  <span class="grp"><span class="lbl">Text</span>
+    <span class="lbl">select to comment, type to edit</span>
+  </span>
+  <button class="btn" id="undo">Undo last mark</button>
+</header>
+
+<main>
+  <div id="stage"></div>
+  <aside>
+    <h2>Feedback</h2>
+    <div id="feed"><p class="empty">Nothing yet. Circle a spot on an image, or select text and
+      click Comment. Typing in the text counts as an edit on its own.</p></div>
+    <h2>Overall note</h2>
+    <textarea id="overall" placeholder="Anything that does not belong to one spot"></textarea>
+  </aside>
+</main>
+
+<footer><button class="send" id="send">Send</button><span id="status"></span></footer>
+<button id="selbtn">Comment</button>
+
+<script>
+const ITEMS = window.__ITEMS__, COLOR = "#c8321e";
+let tool = "ellipse", marks = [], comments = [], seq = 0, drawing = null, activeId = null;
+const originals = new Map();          // blockKey -> original text, for the edit diff
+// Whitespace is layout noise, not an edit: compare on a collapsed form.
+const norm = t => t.replace(/\s+/g, " ").trim();
+
+/* ---------------- stage ---------------- */
+const stage = document.getElementById("stage");
+ITEMS.forEach(item => {
+  const wrap = document.createElement("div");
+  wrap.className = "item";
+  wrap.innerHTML = `<div class="cap"><span class="kindtag">${item.kind === "media" ? "Image" : "Text"}</span>
+                    <span>${item.name}</span></div>`;
+  if (item.kind === "media") {
+    const box = document.createElement("div");
+    box.className = "media"; box.dataset.item = item.id;
+    const img = new Image(); img.src = item.url; img.alt = item.name;
+    const cv = document.createElement("canvas");
+    box.append(img, cv); wrap.append(box);
+    img.onload = () => { cv.width = img.naturalWidth; cv.height = img.naturalHeight; redraw(); };
+    bindDrawing(cv, item.id);
+  } else {
+    const doc = document.createElement("div");
+    doc.className = "doc"; doc.dataset.item = item.id;
+    doc.innerHTML = item.html;
+    // Every top-level block becomes editable and gets a stable key, so a change can be reported
+    // as before/after on that block instead of as a diff of the whole document.
+    [...doc.children].forEach((el, i) => {
+      const key = `${item.id}#${i}`;
+      el.setAttribute("data-blk", key);
+      el.setAttribute("contenteditable", "true");
+      el.setAttribute("spellcheck", "false");
+      el.addEventListener("input", () => {
+        el.classList.toggle("touched", norm(el.innerText) !== originals.get(key));
+        renderFeed();
+      });
+    });
+    // Snapshot AFTER layout. innerText depends on rendering: read before the browser has laid the
+    // block out and a table comes back as "PunktStand…" without its tabs, so every table and list
+    // then reports itself as edited on send. Measured 2026-09-09: 16 phantom edits in one document.
+    requestAnimationFrame(() => {
+      [...doc.children].forEach(el => originals.set(el.getAttribute("data-blk"), norm(el.innerText)));
+    });
+    wrap.append(doc);
+  }
+  stage.append(wrap);
+});
+
+/* ---------------- text selection -> comment ---------------- */
+const selBtn = document.getElementById("selbtn");
+let pendingSel = null;
+
+document.addEventListener("selectionchange", () => {
+  const s = document.getSelection();
+  if (!s || s.isCollapsed || !s.rangeCount) { selBtn.style.display = "none"; pendingSel = null; return; }
+  const range = s.getRangeAt(0);
+  const blk = range.startContainer.parentElement?.closest("[data-blk]");
+  if (!blk || !s.toString().trim()) { selBtn.style.display = "none"; pendingSel = null; return; }
+  const text = blk.innerText, quote = s.toString();
+  const at = text.indexOf(quote);
+  // Prefix/quote/suffix anchoring, the idea ported from upstream human-review (MIT, Peter Yang):
+  // the quote alone is ambiguous when a phrase repeats, the neighbours disambiguate it.
+  pendingSel = { block: blk.getAttribute("data-blk"), item: blk.closest("[data-item]").dataset.item,
+                 quote,
+                 anchor: { prefix: at > 0 ? text.slice(Math.max(0, at - 40), at) : "",
+                           quote, suffix: at >= 0 ? text.slice(at + quote.length, at + quote.length + 40) : "" } };
+  // The scrolling container is #stage, not the window, so viewport coordinates plus position:fixed
+  // are the only pair that puts this button where the selection actually is.
+  const r = range.getBoundingClientRect();
+  selBtn.style.display = "block";
+  selBtn.style.left = `${Math.round(Math.max(8, r.left))}px`;
+  selBtn.style.top = `${Math.round(Math.min(window.innerHeight - 44, r.bottom + 6))}px`;
+});
+
+selBtn.onclick = () => {
+  if (!pendingSel) return;
+  comments.push({ id: ++seq, ...pendingSel, note: "" });
+  activeId = seq; selBtn.style.display = "none";
+  renderFeed();
+  const ta = document.querySelector(`#fb-${activeId} textarea`); if (ta) ta.focus();
+};
+
+/* ---------------- media drawing ---------------- */
+document.querySelectorAll(".tool").forEach(b => b.onclick = () => {
+  tool = b.dataset.tool;
+  document.querySelectorAll(".tool").forEach(x => x.setAttribute("aria-pressed", x === b));
+});
+document.getElementById("undo").onclick = () => { marks.pop(); renderFeed(); redraw(); };
+
+function relPos(ev, cv) {
+  const r = cv.getBoundingClientRect();
+  return { x: (ev.clientX - r.left) / r.width, y: (ev.clientY - r.top) / r.height };
+}
+function bindDrawing(cv, itemId) {
+  cv.addEventListener("pointerdown", ev => {
+    cv.setPointerCapture(ev.pointerId);
+    const p = relPos(ev, cv);
+    drawing = { id: ++seq, item: itemId, tool, note: "", x0: p.x, y0: p.y, x1: p.x, y1: p.y, path: [p] };
+  });
+  cv.addEventListener("pointermove", ev => {
+    if (!drawing || drawing.item !== itemId) return;
+    const p = relPos(ev, cv);
+    drawing.x1 = p.x; drawing.y1 = p.y;
+    if (drawing.tool === "free") drawing.path.push(p);
+    redraw();
+  });
+  cv.addEventListener("pointerup", () => {
+    if (!drawing) return;
+    const big = Math.abs(drawing.x1 - drawing.x0) > .012 || Math.abs(drawing.y1 - drawing.y0) > .012
+             || drawing.path.length > 4;
+    if (big) { marks.push(drawing); activeId = drawing.id; }
+    drawing = null; renderFeed(); redraw();
+    const ta = document.querySelector(`#fb-${activeId} textarea`); if (ta) ta.focus();
+  });
+}
+
+function strokeMark(ctx, m, w, h, number) {
+  const x0 = m.x0*w, y0 = m.y0*h, x1 = m.x1*w, y1 = m.y1*h;
+  ctx.save();
+  ctx.strokeStyle = COLOR; ctx.lineWidth = Math.max(3, w*0.004);
+  ctx.lineJoin = "round"; ctx.lineCap = "round";
+  if (m.tool === "ellipse") {
+    ctx.beginPath();
+    ctx.ellipse((x0+x1)/2, (y0+y1)/2, Math.abs(x1-x0)/2, Math.abs(y1-y0)/2, 0, 0, Math.PI*2); ctx.stroke();
+  } else if (m.tool === "rect") {
+    ctx.strokeRect(Math.min(x0,x1), Math.min(y0,y1), Math.abs(x1-x0), Math.abs(y1-y0));
+  } else if (m.tool === "free") {
+    ctx.beginPath(); m.path.forEach((p,i) => i ? ctx.lineTo(p.x*w,p.y*h) : ctx.moveTo(p.x*w,p.y*h)); ctx.stroke();
+  } else {
+    const a = Math.atan2(y1-y0, x1-x0), head = Math.max(14, w*0.018);
+    ctx.beginPath(); ctx.moveTo(x0,y0); ctx.lineTo(x1,y1); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(x1,y1);
+    ctx.lineTo(x1-head*Math.cos(a-0.4), y1-head*Math.sin(a-0.4)); ctx.moveTo(x1,y1);
+    ctx.lineTo(x1-head*Math.cos(a+0.4), y1-head*Math.sin(a+0.4)); ctx.stroke();
+  }
+  if (number) {
+    const bx = Math.min(x0,x1), by = Math.min(y0,y1), r = Math.max(13, w*0.016);
+    ctx.beginPath(); ctx.arc(bx, by, r, 0, Math.PI*2); ctx.fillStyle = COLOR; ctx.fill();
+    ctx.fillStyle = "#fff"; ctx.font = `700 ${Math.round(r*1.25)}px -apple-system,sans-serif`;
+    ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(String(number), bx, by+1);
+  }
+  ctx.restore();
+}
+
+function redraw() {
+  ITEMS.filter(i => i.kind === "media").forEach(i => {
+    const cv = document.querySelector(`.media[data-item="${i.id}"] canvas`);
+    if (!cv) return;
+    const ctx = cv.getContext("2d");
+    ctx.clearRect(0, 0, cv.width, cv.height);
+    marks.filter(m => m.item === i.id).forEach(m => strokeMark(ctx, m, cv.width, cv.height, numberOf(m)));
+    if (drawing && drawing.item === i.id) strokeMark(ctx, drawing, cv.width, cv.height, 0);
+  });
+}
+
+/* ---------------- feedback list ---------------- */
+function edits() {
+  const out = [];
+  document.querySelectorAll("[data-blk]").forEach(el => {
+    const key = el.getAttribute("data-blk");
+    const before = originals.get(key), after = norm(el.innerText);
+    if (before !== undefined && before !== after)
+      out.push({ key, item: el.closest("[data-item]").dataset.item, before, after,
+                 label: el.tagName.toLowerCase() });
+  });
+  return out;
+}
+const ordered = () => [...marks, ...comments].sort((a,b) => a.id - b.id);
+const numberOf = m => ordered().findIndex(x => x.id === m.id) + 1;
+
+function renderFeed() {
+  const host = document.getElementById("feed");
+  const list = ordered(), eds = edits();
+  if (!list.length && !eds.length) {
+    host.innerHTML = `<p class="empty">Nothing yet. Circle a spot on an image, or select text and click
+      Comment. Typing in the text counts as an edit on its own.</p>`;
+    redraw(); return;
+  }
+  host.innerHTML = "";
+  list.forEach((m, idx) => {
+    const item = ITEMS.find(i => i.id === (m.item));
+    const el = document.createElement("div");
+    el.className = "card" + (m.id === activeId ? " active" : ""); el.id = `fb-${m.id}`;
+    const where = m.tool ? `${item.name} · ${m.tool}` : `${item.name} · text`;
+    el.innerHTML = `<div class="top"><span class="badge">${idx+1}</span>
+        <span class="where">${where}</span><button class="del" title="delete">×</button></div>
+        ${m.quote ? `<div class="quote">${m.quote.slice(0,140)}</div>` : ""}
+        <textarea placeholder="What should be different here?"></textarea>`;
+    const ta = el.querySelector("textarea");
+    ta.value = m.note; ta.oninput = e => { m.note = e.target.value; };
+    el.querySelector(".del").onclick = () => {
+      marks = marks.filter(x => x !== m); comments = comments.filter(x => x !== m);
+      renderFeed(); redraw();
+    };
+    el.onclick = () => { activeId = m.id; renderFeed(); };
+    host.append(el);
+  });
+  eds.forEach(e => {
+    const el = document.createElement("div");
+    el.className = "card";
+    el.innerHTML = `<div class="top"><span class="badge edit">✎</span>
+        <span class="where">${ITEMS.find(i => i.id === e.item).name} · edited</span></div>
+        <div class="diff"><span class="b">${e.before.slice(0,90)}</span><br>
+        <span class="a">${e.after.slice(0,90)}</span></div>`;
+    host.append(el);
+  });
+  redraw();
+}
+
+/* ---------------- send ---------------- */
+function exportMedia(itemId) {
+  const box = document.querySelector(`.media[data-item="${itemId}"]`);
+  const img = box.querySelector("img"), w = img.naturalWidth, h = img.naturalHeight;
+  const over = document.createElement("canvas"); over.width = w; over.height = h;
+  const octx = over.getContext("2d"); octx.drawImage(img, 0, 0, w, h);
+  const mine = marks.filter(m => m.item === itemId);
+  mine.forEach(m => strokeMark(octx, m, w, h, numberOf(m)));
+  const crops = mine.map(m => {
+    const xs = m.tool === "free" ? m.path.map(p => p.x) : [m.x0, m.x1];
+    const ys = m.tool === "free" ? m.path.map(p => p.y) : [m.y0, m.y1];
+    let x0 = Math.min(...xs)*w, x1 = Math.max(...xs)*w, y0 = Math.min(...ys)*h, y1 = Math.max(...ys)*h;
+    const px = Math.max((x1-x0)*0.35, w*0.05), py = Math.max((y1-y0)*0.35, h*0.035);
+    x0 = Math.max(0, x0-px); y0 = Math.max(0, y0-py); x1 = Math.min(w, x1+px); y1 = Math.min(h, y1+py);
+    const cw = Math.max(24, Math.round(x1-x0)), ch = Math.max(24, Math.round(y1-y0));
+    const c = document.createElement("canvas"); c.width = cw; c.height = ch;
+    c.getContext("2d").drawImage(over, Math.round(x0), Math.round(y0), cw, ch, 0, 0, cw, ch);
+    return { mark: m.id, png: c.toDataURL("image/png") };
+  });
+  return { overview: over.toDataURL("image/png"), crops, marks: mine };
+}
+
+document.getElementById("send").onclick = async () => {
+  document.getElementById("send").disabled = true;
+  document.getElementById("status").textContent = "sending…";
+  const eds = edits();
+  const pages = ITEMS.map(item => {
+    if (item.kind === "media") {
+      const mine = marks.filter(m => m.item === item.id);
+      if (!mine.length) return null;
+      const ex = exportMedia(item.id);
+      return { kind: "media", name: item.name, overview_png: ex.overview, crops: ex.crops,
+        comments: mine.map(m => ({ id: `m_${m.id}`, number: numberOf(m), tool: m.tool, note: m.note,
+          box: { x:+Math.min(m.x0,m.x1).toFixed(4), y:+Math.min(m.y0,m.y1).toFixed(4),
+                 w:+Math.abs(m.x1-m.x0).toFixed(4), h:+Math.abs(m.y1-m.y0).toFixed(4) } })) };
+    }
+    const mine = comments.filter(c => c.item === item.id);
+    const myEdits = eds.filter(e => e.item === item.id);
+    if (!mine.length && !myEdits.length) return null;
+    return { kind: "text", name: item.name,
+      comments: mine.map(c => ({ id: `c_${c.id}`, number: numberOf(c), quote: c.quote,
+                                 anchor: c.anchor, block: c.block, note: c.note })),
+      edits: myEdits.map(e => ({ block: e.key, label: e.label, before: e.before, after: e.after })) };
+  }).filter(Boolean);
+
+  const r = await fetch("/send", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pages, overall_note: document.getElementById("overall").value }) });
+  document.getElementById("status").textContent =
+    r.ok ? "received, you can close this window" : "send failed";
+};
+</script>
+</body></html>

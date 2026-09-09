@@ -8,6 +8,7 @@ The Agent Skills format is an open, cross-agent spec, so nothing here is tied to
 
 | Skill | Use it when |
 | --- | --- |
+| [`human-review`](skills/human-review/) | A draft has to go in front of the person you are working for before it ships, and "does this look right?" in chat gets "looks good" back. They retype the text, comment on any selection, and circle the part of an image or PDF page that is wrong, with a note per mark. One local page for text and pictures together, one Send, one batch back. Python standard library only, no npm, works offline. |
 | [`comb-pdf-form-filling`](skills/comb-pdf-form-filling/) | An official PDF form has to be filled so that each character lands inside its own printed box (a comb field): IBAN, tax number, BIC, dates. Built against German Behörden, tax and bank forms, and applies to any AcroForm or flat PDF with printed boxes. |
 
 A comb field prints one box per character, and filling it as an ordinary text field puts the string across the dividers. Same value, same field, both ways:
