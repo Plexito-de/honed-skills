@@ -11,7 +11,11 @@ The Agent Skills format is an open, cross-agent spec, so nothing here is tied to
 | [`human-review`](skills/human-review/) | A draft has to go in front of the person you are working for before it ships, and "does this look right?" in chat gets "looks good" back. They retype the text, comment on any selection, and circle the part of an image or PDF page that is wrong, with a note per mark. One local page for text and pictures together, one Send, one batch back. Python standard library only, no npm, works offline. |
 | [`comb-pdf-form-filling`](skills/comb-pdf-form-filling/) | An official PDF form has to be filled so that each character lands inside its own printed box (a comb field): IBAN, tax number, BIC, dates. Built against German Behörden, tax and bank forms, and applies to any AcroForm or flat PDF with printed boxes. |
 
-A comb field prints one box per character, and filling it as an ordinary text field puts the string across the dividers. Same value, same field, both ways:
+**`human-review`.** One local page holds the card and the draft. Two marks sit on the picture, a third comments on a selected phrase, the retyped headline comes back as a before and after, and the numbered list on the right is what the agent receives:
+
+![The review page: a launch card with a circled date badge numbered 1 and an arrow numbered 2, the draft below it with a highlighted edited heading, and a sidebar listing all four items with a typed note under each](skills/human-review/assets/example-review.png)
+
+**`comb-pdf-form-filling`.** A comb field prints one box per character, and filling it as an ordinary text field puts the string across the dividers. Same value, same field, both ways:
 
 ![A comb field filled wrongly as one continuous string, and filled correctly with one glyph centred per box](skills/comb-pdf-form-filling/assets/comb-field-wrong-vs-right.png)
 
@@ -51,7 +55,7 @@ A skill in this repo has to earn its lines:
 
 ## Contributing
 
-Issues and pull requests are welcome. A new skill needs a `SKILL.md` with `name` and `description` frontmatter, a gotchas section drawn from real use, and placeholder-only examples.
+Issues and pull requests are welcome. A new skill needs a `SKILL.md` with `name` and `description` frontmatter, a gotchas section drawn from real use, placeholder-only examples, and a picture of the thing working where the output is something you can look at. The picture is generated from a script that ships with the skill, so anyone can regenerate it and see that nothing real went into it.
 
 Two rules exist because a skills repo does not distribute documentation, it distributes instructions that land in someone else's agent context along with code that agent may run:
 

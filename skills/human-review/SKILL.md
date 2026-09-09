@@ -15,6 +15,11 @@ Text and pictures sit on the same page on purpose. A draft is rarely only prose 
 invitation is a rendered card and its copy. A post is text and its hero image. Two surfaces split the
 reviewer's attention. They also cost a round every time an item crosses the boundary.
 
+![The review page: a launch card with a circled date badge numbered 1 and an arrow numbered 2, the draft below it with a highlighted edited heading, and a sidebar listing all four items with a typed note under each](assets/example-review.png)
+
+One card, one draft, four items back. Everything in the picture is invented, and
+[`scripts/make_example_inputs.py`](scripts/make_example_inputs.py) rebuilds the two files behind it.
+
 ## The loop
 
 ```sh
