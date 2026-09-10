@@ -13,7 +13,7 @@ metadata:
 
 A **comb field** prints one open box per character, so the form expects one glyph per box. Filling it as an ordinary text field puts a continuous string over the top and the characters land across the dividers, which is what an authority rejects:
 
-![A comb field filled wrongly as one continuous string, and filled correctly with one glyph centred per box](https://raw.githubusercontent.com/Plexito-de/honed-skills/main/docs/assets/comb-field-wrong-vs-right.png)
+![A comb field filled wrongly as one continuous string, and filled correctly with one glyph centred per box](../../docs/assets/comb-field-wrong-vs-right.png)
 
 Both rows above hold the same value in the same field. The top one is what you get by default; the bottom one is what this skill produces. Regenerate the image with the illustration script under `scripts/`, and note that the image lives at `docs/assets/` in the repository rather than inside this folder: a skill folder that bundles a binary is reported HIGH by a security scanner that cannot read it, at a fixed confidence, twice over. Keeping the folder text-only costs nothing and the image still renders here.
 
