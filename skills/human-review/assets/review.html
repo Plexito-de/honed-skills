@@ -73,6 +73,12 @@ aside h2{font-size:11.5px;letter-spacing:.09em;text-transform:uppercase;color:va
 footer{position:fixed;right:0;bottom:0;width:390px;background:var(--paper);border-top:1px solid var(--line);
        border-left:1px solid var(--line);padding:12px 16px;display:flex;gap:10px;align-items:center}
 #status{font-size:13px;color:var(--mut)}
+.send:disabled{background:#9AA3AB;cursor:default}
+.done{display:flex;align-items:center;gap:10px;font-size:15px;font-weight:600;color:#1B7F4B}
+.done .tick{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;
+  border-radius:50%;background:#1B7F4B;color:#fff;font-size:15px}
+.done small{display:block;font-weight:400;color:var(--mut);font-size:13px;margin-top:2px}
+body.sent #stage,body.sent #side{opacity:.5;pointer-events:none;filter:grayscale(.25)}
 #selbtn{position:fixed;z-index:50;display:none;background:var(--ink);color:#fff;border:0;
         border-radius:7px;padding:6px 11px;font:inherit;font-size:13px;cursor:pointer;
         box-shadow:0 4px 14px rgba(0,0,0,.2)}
@@ -277,6 +283,13 @@ function edits() {
 const ordered = () => [...marks, ...comments].sort((a,b) => a.id - b.id);
 const numberOf = m => ordered().findIndex(x => x.id === m.id) + 1;
 
+// A note box that scrolls hides the sentence somebody just wrote, and they cannot see whether the
+// end of it survived. Grow to fit instead.
+function fit(ta) {
+  ta.style.height = "auto";
+  ta.style.height = `${Math.min(ta.scrollHeight + 2, 420)}px`;
+}
+
 function setActive(id) {
   activeId = id;
   document.querySelectorAll("#feed .card").forEach(c =>
@@ -303,7 +316,9 @@ function renderFeed() {
         ${m.quote ? `<div class="quote">${m.quote.slice(0,140)}</div>` : ""}
         <textarea placeholder="What should be different here?"></textarea>`;
     const ta = el.querySelector("textarea");
-    ta.value = m.note; ta.oninput = e => { m.note = e.target.value; };
+    ta.value = m.note;
+    ta.oninput = e => { m.note = e.target.value; fit(ta); };
+    fit(ta);
     el.querySelector(".del").onclick = () => {
       marks = marks.filter(x => x !== m); comments = comments.filter(x => x !== m);
       renderFeed(); redraw();
@@ -371,10 +386,30 @@ document.getElementById("send").onclick = async () => {
       edits: myEdits.map(e => ({ block: e.key, label: e.label, before: e.before, after: e.after })) };
   }).filter(Boolean);
 
-  const r = await fetch("/send", { method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ pages, overall_note: document.getElementById("overall").value }) });
-  document.getElementById("status").textContent =
-    r.ok ? "received, you can close this window" : "send failed";
+  const note = document.getElementById("overall").value;
+  const n = pages.reduce((s, p) => s + (p.comments || []).length + (p.edits || []).length, 0);
+  let r;
+  try {
+    r = await fetch("/send", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pages, overall_note: note }) });
+  } catch (e) {
+    r = { ok: false, statusText: e.message };
+  }
+  const foot = document.querySelector("footer");
+  if (r.ok) {
+    // The page has to LOOK finished. The first version disabled the button, said "received" in 13px
+    // grey beside it, and left everything else live, so it read as a dead button on a live page and
+    // the sender clicked it again and again. Measured on the first real use, 2026-09-10.
+    document.body.classList.add("sent");
+    const items = n + (note.trim() ? 1 : 0);
+    foot.innerHTML = `<span class="done"><span class="tick">&#10003;</span><span>Sent.
+      ${items} item${items === 1 ? "" : "s"} went to the agent.
+      <small>Nothing more to do here. You can close this window.</small></span></span>`;
+  } else {
+    document.getElementById("send").disabled = false;
+    document.getElementById("status").textContent =
+      `send failed (${r.statusText || "no reply"}), your marks are still here, try again`;
+  }
 };
 </script>
 </body></html>
