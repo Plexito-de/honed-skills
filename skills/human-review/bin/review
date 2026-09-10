@@ -286,7 +286,7 @@ def write_outputs(sess: Path, payload: dict) -> dict:
 
 
 # --------------------------------------------------------------------------- server
-def serve(sess: Path, items: list[dict]) -> None:
+def serve(sess: Path, items: list[dict], port: int = 0) -> None:
     app = APP.read_text()
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -346,18 +346,43 @@ def serve(sess: Path, items: list[dict]) -> None:
                         pass
             threading.Timer(0.6, lambda: os.kill(os.getpid(), signal.SIGTERM)).start()
 
-    with socketserver.TCPServer(("127.0.0.1", 0), Handler) as httpd:
+    # Port 0 means "any free port", which is right on the machine you are sitting at. A FIXED port
+    # is for the case where something outside this tool has to find the page: a forward from a
+    # laptop to a workstation, a container mapping, a bookmark. It is never a wider bind: the
+    # address stays 127.0.0.1 either way, and a review page holds a draft nobody else should read.
+    #
+    # A taken port is an ERROR rather than a silent fallback to a random one. The whole value of
+    # asking for a port is that the answer is predictable, and a fallback would hand back a working
+    # page at an address the thing waiting for it is not watching.
+    try:
+        httpd = socketserver.TCPServer(("127.0.0.1", port), Handler)
+    except OSError as e:
+        # stderr here goes to server.log, which nobody is watching, so the reason is written where
+        # the parent will look for it.
+        (sess / "error").write_text(
+            f"cannot listen on 127.0.0.1:{port} ({e.strerror}). "
+            f"Free that port, or omit --port to take any free one.")
+        sys.exit(1)
+    with httpd:
         (sess / "url").write_text(f"http://127.0.0.1:{httpd.server_address[1]}/")
         (sess / "server.pid").write_text(str(os.getpid()))
         httpd.serve_forever()
 
 
 # --------------------------------------------------------------------------- commands
+def review_port(args) -> int:
+    """The port to listen on: the flag, else REVIEW_PORT, else 0 for any free one."""
+    if getattr(args, "port", None):
+        return int(args.port)
+    env = os.environ.get("REVIEW_PORT", "").strip()
+    return int(env) if env.isdigit() else 0
+
+
 def cmd_open(args) -> int:
     paths = [Path(p).expanduser() for p in args.files]
     sess = ROOT / session_id(paths)
     sess.mkdir(parents=True, exist_ok=True)
-    for stale in ("batch.json", "url", "server.pid", "receipt.json"):
+    for stale in ("batch.json", "url", "server.pid", "receipt.json", "error"):
         (sess / stale).unlink(missing_ok=True)
     # draft.json is deliberately NOT cleared: reopening the same files restores what was typed.
     (sess / "on_send").write_text(getattr(args, "on_send", "") or "")
@@ -368,9 +393,19 @@ def cmd_open(args) -> int:
             if (sess / "url").exists():
                 break
             time.sleep(0.05)
-        url = (sess / "url").read_text().strip() if (sess / "url").exists() else "(not started)"
         kinds = ", ".join(f"{sum(1 for i in items if i['kind'] == k)} {k}"
                           for k in ("text", "media") if any(i["kind"] == k for i in items))
+        # A SERVER THAT NEVER CAME UP MUST NOT LOOK LIKE ONE THAT DID. The first version printed
+        # "(not started)", followed it with the poll instructions, and exited 0, so a caller that
+        # checked the exit code saw a healthy open and waited forever for a page that was never
+        # served. The child writes the reason and this reports it.
+        if not (sess / "url").exists():
+            why = (sess / "error").read_text().strip() if (sess / "error").exists() else \
+                  "the server did not start; see " + str(sess / "server.log")
+            print(f"Staged {kinds} as session {sess.name}", file=sys.stderr)
+            print(why, file=sys.stderr)
+            return 1
+        url = (sess / "url").read_text().strip()
         print(f"Reviewing {kinds} as session {sess.name}")
         print(url)
         if shutil.which("clip-put"):               # the URL belongs on his clipboard, not only here
@@ -385,7 +420,7 @@ def cmd_open(args) -> int:
     log = os.open(str(sess / "server.log"), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     devnull = os.open(os.devnull, os.O_RDONLY)
     os.dup2(devnull, 0); os.dup2(log, 1); os.dup2(log, 2)
-    serve(sess, items)
+    serve(sess, items, port=review_port(args))
     return 0
 
 
@@ -451,6 +486,9 @@ def main() -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     o = sub.add_parser("open"); o.add_argument("files", nargs="+")
     o.add_argument("--no-browser", action="store_true")
+    o.add_argument("--port", type=int, default=None, metavar="N",
+                   help="listen on this port instead of any free one, still on 127.0.0.1 only. "
+                        "Also settable as REVIEW_PORT.")
     o.add_argument("--on-send", default="", metavar="CMD",
                    help="shell command to run once a batch has been written, for whatever tells "
                         "the agent it arrived")
