@@ -1,0 +1,52 @@
+# Accepted findings for the excalidraw skill, with the reason for each.
+#
+# HAND-CORRECTED. Do not regenerate this file from a per-rule template.
+#
+# Three rules govern what may be written here, and the third one is the least obvious:
+#   1. State what the rule detects and why a match of that shape is accepted.
+#   2. Assert nothing about what this skill is for. A reason that makes such a claim becomes false
+#      the moment it is reused somewhere the claim does not hold.
+#   3. NEVER quote the string the rule fired on. This file is itself a scanned component, so
+#      quoting a match reproduces it, and the damage hides: the self-hit is suppressed by the very
+#      entry that created it, so the applied score still reads clean while the BARE score, the one
+#      a reader of the repository sees, is inflated. Measured elsewhere in this repository at +36
+#      points on one skill. Give the location instead.
+#
+# Scanned with SkillSpector v2.11.1, static analysis only, on 2026-09-09.
+# Result measured WITHOUT this file present: 32/100, MEDIUM, CAUTION.
+version: 2
+
+rules:
+  - id: "AE1"
+    # HIGH, 1 occurrence. Matched at: SKILL.md:132, pointing at scripts/exlint.py.
+    reason: >-
+      AE1 reports that a referenced artifact was not completely inspected, at HIGH and hardcoded
+      confidence 1.0, and its remediation asks for the artifact to be made locally available and
+      fully analyzable. That remediation does not apply: the file is local, present, readable and
+      590 lines of standard-library Python with no imports beyond argparse, json, math, sys and
+      pathlib. What happens is that a bounded static parser stops early on it and the file is
+      therefore reported as partially inspected, which turns the reference to it from SKILL.md into
+      this finding. Four causes of that partial state were isolated on 2026-09-09, and this is the
+      fourth: an unpaired quote or apostrophe opens a span the parser cannot close, and when the
+      distance to the next one is long it gives up on the whole file. It is a span problem rather
+      than a character problem, proved by an otherwise identical two-line file scanning clean.
+      Three separate fixes were attempted and measured before this entry was written: a nested
+      quote inside an f-string expression was hoisted out in two places, a backticked filename in
+      prose was reworded, and the two prose possessives were removed. Each reduced the score,
+      44 to 32, and the last did not clear it, because the remaining spans come from ordinary
+      Python subscripts inside f-strings which cannot be removed without making the code worse.
+      Rejected alternative: splitting the linter into smaller files purely so a scanner's parser
+      reaches the end. That would restructure working code to flatter a tool, and the code is the
+      thing that has to be right.
+
+  - id: "LP3"
+    # MEDIUM, 1 occurrence. Matched at: SKILL.md:1, the frontmatter.
+    reason: >-
+      LP3 asks for a declared tool scope so a skill's intent can be validated, which is a fair
+      goal. Declined as policy rather than as an oversight: a skill that declares its own tool
+      scope pre-approves those tools inside the reader's agent, which removes their permission
+      decision instead of informing it. The repository this skill is published from forbids the
+      field for that reason, and says so in its contributing rules. Rejected alternative: adding
+      the field to satisfy the scanner, which would trade a real reduction in the reader's control
+      for seven points of score. Note also that this rule only fires because the skill ships
+      scripts at all: the same skill body with no scripts directory produces no LP3.

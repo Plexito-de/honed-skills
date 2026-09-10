@@ -1,0 +1,44 @@
+# A request path, the commonest architecture diagram there is.
+# Node and edge counts follow the measurement: 6-12 primary nodes, one stroke colour, and
+# colour used only where it carries a role.
+type: flow
+title: Request path
+style: architecture
+fontSize: md
+
+nodes:
+  - id: browser
+    label: Browser
+  - id: cdn
+    label: CDN
+  - id: lb
+    label: Load balancer
+  - id: api
+    label: API
+    color: blue          # the one coloured node: the subject of the diagram
+  - id: cache
+    label: Redis
+  - id: db
+    label: Postgres
+
+edges:
+  - from: browser
+    to: cdn
+  - from: cdn
+    to: lb
+  - from: lb
+    to: api
+  - from: api
+    to: cache
+    label: read
+  - from: api
+    to: db
+    label: write
+  - from: cache
+    to: db
+    label: miss
+    style: dashed        # dashed is scarce on purpose: 0.9% of strokes in the published corpus
+
+notes:
+  - at: api
+    text: rate-limited, 100 rps

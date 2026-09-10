@@ -10,6 +10,7 @@ The Agent Skills format is an open, cross-agent spec, so nothing here is tied to
 | --- | --- |
 | [`human-review`](skills/human-review/) | A draft has to go in front of the person you are working for before it ships, and "does this look right?" in chat gets "looks good" back. They retype the text, comment on any selection, and circle the part of an image or PDF page that is wrong, with a note per mark. One local page for text and pictures together, one Send, one batch back. Python standard library only, no npm, works offline. |
 | [`comb-pdf-form-filling`](skills/comb-pdf-form-filling/) | An official PDF form has to be filled so that each character lands inside its own printed box (a comb field): IBAN, tax number, BIC, dates. Built against German Behörden, tax and bank forms, and applies to any AcroForm or flat PDF with printed boxes. |
+| [`excalidraw`](skills/excalidraw/) | A diagram has to be produced as a `.excalidraw` file and look hand-drawn: architecture, flow, sequence, tree, mind map, timeline, network. Writes a short spec and expands it deterministically, with font widths measured in a browser against the real fonts rather than guessed from a multiplier, and a linter that runs before you look. |
 
 **`human-review`.** One local page holds the card and the draft. Two marks sit on the picture, a third comments on a selected phrase, the retyped headline comes back as a before and after, and the numbered list on the right is what the agent receives:
 
@@ -61,6 +62,7 @@ Two rules exist because a skills repo does not distribute documentation, it dist
 
 - **No `allowed-tools` declaration and no shell substitution in a skill body.** A skill must not pre-approve tools for itself or smuggle command execution into its text. If a skill needs a command run, it says so in prose and the human decides.
 - **Scripts stay readable and dependency-light.** Anything under `scripts/` should be short enough to audit in one sitting, and its dependencies named in the frontmatter `compatibility` field.
+- **Every skill here is scanned before it ships, and no finding is hidden.** We run [NVIDIA SkillSpector](https://github.com/NVIDIA/SkillSpector) over each skill and read the JSON rather than the exit code, because `skillspector scan` exits `0` for anything scoring 50 or less and a skill can carry a HIGH finding at 31. Whatever survives is either fixed or written down: a skill that keeps a finding ships a `.skillspector-baseline.yaml` giving the reason per rule and naming the alternative we rejected. That file changes nothing about your own scan, by design, since the tool ignores a baseline the author ships unless you ask for it with `--use-shipped-baseline`. It is there so you can see the decision and disagree with it. Two consequences you can check: **binary assets live outside the skill folder** (`docs/assets/`, referenced by absolute URL) because a bundled image the scanner cannot read is reported HIGH at fixed confidence, twice over in our case; and where a skill cannot reach `SAFE` we say why rather than suppressing the reason.
 
 ## License
 
