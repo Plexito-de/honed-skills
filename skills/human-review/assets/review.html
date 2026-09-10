@@ -105,7 +105,8 @@ body.sent #stage,body.sent #side{opacity:.5;pointer-events:none;filter:grayscale
     <div id="feed"><p class="empty">Nothing yet. Circle a spot on an image, or select text and
       click Comment. Typing in the text counts as an edit on its own.</p></div>
     <h2>Overall note</h2>
-    <textarea id="overall" placeholder="Anything that does not belong to one spot"></textarea>
+    <textarea id="overall" placeholder="Anything that does not belong to one spot"
+    oninput="saveDraft()"></textarea>
   </aside>
 </main>
 
@@ -147,7 +148,7 @@ ITEMS.forEach(item => {
       el.setAttribute("spellcheck", "false");
       el.addEventListener("input", () => {
         el.classList.toggle("touched", norm(el.innerText) !== originals.get(key));
-        renderFeed();
+        renderFeed(); saveDraft();
       });
     });
     // Snapshot AFTER layout. innerText depends on rendering: read before the browser has laid the
@@ -191,7 +192,7 @@ selBtn.onclick = () => {
   if (!pendingSel) return;
   comments.push({ id: ++seq, ...pendingSel, note: "" });
   activeId = seq; selBtn.style.display = "none";
-  renderFeed();
+  renderFeed(); saveDraft();
   const ta = document.querySelector(`#fb-${activeId} textarea`); if (ta) ta.focus();
 };
 
@@ -200,7 +201,7 @@ document.querySelectorAll(".tool").forEach(b => b.onclick = () => {
   tool = b.dataset.tool;
   document.querySelectorAll(".tool").forEach(x => x.setAttribute("aria-pressed", x === b));
 });
-document.getElementById("undo").onclick = () => { marks.pop(); renderFeed(); redraw(); };
+document.getElementById("undo").onclick = () => { marks.pop(); renderFeed(); redraw(); saveDraft(); };
 
 function relPos(ev, cv) {
   const r = cv.getBoundingClientRect();
@@ -224,7 +225,7 @@ function bindDrawing(cv, itemId) {
     const big = Math.abs(drawing.x1 - drawing.x0) > .012 || Math.abs(drawing.y1 - drawing.y0) > .012
              || drawing.path.length > 4;
     if (big) { marks.push(drawing); activeId = drawing.id; }
-    drawing = null; renderFeed(); redraw();
+    drawing = null; renderFeed(); redraw(); saveDraft();
     const ta = document.querySelector(`#fb-${activeId} textarea`); if (ta) ta.focus();
   });
 }
@@ -317,11 +318,11 @@ function renderFeed() {
         <textarea placeholder="What should be different here?"></textarea>`;
     const ta = el.querySelector("textarea");
     ta.value = m.note;
-    ta.oninput = e => { m.note = e.target.value; fit(ta); };
+    ta.oninput = e => { m.note = e.target.value; fit(ta); saveDraft(); };
     fit(ta);
     el.querySelector(".del").onclick = () => {
       marks = marks.filter(x => x !== m); comments = comments.filter(x => x !== m);
-      renderFeed(); redraw();
+      renderFeed(); redraw(); saveDraft();
     };
     // Selecting a card must NOT re-render the feed. renderFeed() rebuilds every card from
     // innerHTML, so a click inside the textarea destroyed the element it had just focused and
@@ -363,6 +364,57 @@ function exportMedia(itemId) {
   return { overview: over.toDataURL("image/png"), crops, marks: mine };
 }
 
+/* ---------------- never lose what was typed ---------------- */
+// Everything lives in this page until Send, so a closed tab, a reload or a crash used to cost the
+// whole round. The state is posted to the server on every change, debounced, and read back on load.
+let saveTimer = null;
+function saveDraft() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    const blocks = {};
+    document.querySelectorAll("[data-blk]").forEach(el => { blocks[el.getAttribute("data-blk")] = el.innerHTML; });
+    const body = JSON.stringify({ marks, comments, seq,
+      overall: document.getElementById("overall").value, blocks });
+    try { localStorage.setItem(`review:${window.__SESSION__}`, body); } catch (e) {}
+    fetch("/draft", { method: "POST", headers: { "Content-Type": "application/json" }, body })
+      .catch(() => {});
+  }, 400);
+}
+
+async function restoreDraft() {
+  let d = null;
+  try {
+    const r = await fetch("/draft");
+    if (r.ok) d = await r.json();
+  } catch (e) {}
+  if (!d || (!d.marks?.length && !d.comments?.length && !d.overall && !d.blocks)) {
+    try { d = JSON.parse(localStorage.getItem(`review:${window.__SESSION__}`) || "null"); }
+    catch (e) { d = null; }
+  }
+  if (!d) return;
+  marks = d.marks || []; comments = d.comments || [];
+  seq = d.seq || Math.max(0, ...marks.map(m => m.id), ...comments.map(c => c.id));
+  if (d.overall) document.getElementById("overall").value = d.overall;
+  Object.entries(d.blocks || {}).forEach(([key, htmlText]) => {
+    const el = document.querySelector(`[data-blk="${CSS.escape(key)}"]`);
+    if (el && el.innerHTML !== htmlText) el.innerHTML = htmlText;
+  });
+  renderFeed(); redraw();
+}
+
+// The snapshot of the original text has to be taken before a draft overwrites the blocks, or every
+// restored edit reports itself as unchanged.
+requestAnimationFrame(() => requestAnimationFrame(restoreDraft));
+
+// Cmd+Enter (Ctrl+Enter elsewhere) sends, from anywhere on the page including inside a note.
+document.addEventListener("keydown", e => {
+  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+    e.preventDefault();
+    const b = document.getElementById("send");
+    if (b && !b.disabled) b.click();
+  }
+});
+
 document.getElementById("send").onclick = async () => {
   document.getElementById("send").disabled = true;
   document.getElementById("status").textContent = "sending…";
@@ -402,9 +454,19 @@ document.getElementById("send").onclick = async () => {
     // the sender clicked it again and again. Measured on the first real use, 2026-09-10.
     document.body.classList.add("sent");
     const items = n + (note.trim() ? 1 : 0);
+    try { localStorage.removeItem(`review:${window.__SESSION__}`); } catch (e) {}
     foot.innerHTML = `<span class="done"><span class="tick">&#10003;</span><span>Sent.
       ${items} item${items === 1 ? "" : "s"} went to the agent.
-      <small>Nothing more to do here. You can close this window.</small></span></span>`;
+      <small>Closing this window.</small></span></span>`;
+    // A tab the browser did not open by script cannot always be closed by script. Try anyway, and
+    // when the browser refuses, say plainly that it is finished rather than pretending it closed.
+    setTimeout(() => {
+      window.close();
+      setTimeout(() => {
+        const s = foot.querySelector(".done small");
+        if (s) s.textContent = "Nothing more to do here. You can close this window.";
+      }, 400);
+    }, 900);
   } else {
     document.getElementById("send").disabled = false;
     document.getElementById("status").textContent =
