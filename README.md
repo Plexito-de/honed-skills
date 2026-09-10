@@ -18,7 +18,7 @@ The Agent Skills format is an open, cross-agent spec, so nothing here is tied to
 
 **`comb-pdf-form-filling`.** A comb field prints one box per character, and filling it as an ordinary text field puts the string across the dividers. Same value, same field, both ways:
 
-![A comb field filled wrongly as one continuous string, and filled correctly with one glyph centred per box](skills/comb-pdf-form-filling/assets/comb-field-wrong-vs-right.png)
+![A comb field filled wrongly as one continuous string, and filled correctly with one glyph centred per box](docs/assets/comb-field-wrong-vs-right.png)
 
 ## Install
 
