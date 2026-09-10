@@ -5,7 +5,7 @@ Deliberately synthetic: the image has to show what a comb field is without shipp
 authority's form layout or anyone's data. Every box here is drawn by this script and every value is
 a documentation placeholder (DE89370400440532013000 is the standard German example IBAN).
 
-Run: python make_example_images.py            # writes ../assets/comb-field-wrong-vs-right.png
+Run: python make_example_images.py            # writes ../../../docs/assets/comb-field-wrong-vs-right.png
 Deps: reportlab, pdftoppm (poppler), Pillow.
 """
 
@@ -18,7 +18,11 @@ from pathlib import Path
 from reportlab.pdfgen import canvas
 from reportlab.pdfbase.pdfmetrics import stringWidth
 
-ASSETS = Path(__file__).resolve().parent.parent / "assets"
+# The picture lives outside the skill folder, in the repository docs, so the folder somebody
+# copies out stays text-only: a bundled binary a security scanner cannot read is reported
+# HIGH at fixed confidence, once per reference. parents[3] is the repository root here and
+# claude-global/ in the private tree, and docs/assets exists in both.
+ASSETS = Path(__file__).resolve().parents[3] / "docs" / "assets"
 IBAN = "DE89370400440532013000"
 CELLS = 34
 FS = 11.0
