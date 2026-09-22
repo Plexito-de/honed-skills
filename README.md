@@ -10,6 +10,7 @@ The Agent Skills format is an open, cross-agent spec, so nothing here is tied to
 | --- | --- |
 | [`human-review`](skills/human-review/) | A draft has to go in front of the person you are working for before it ships, and "does this look right?" in chat gets "looks good" back. They retype the text, comment on any selection, and circle the part of an image or PDF page that is wrong, with a note per mark. One local page for text and pictures together, one Send, one batch back. Python standard library only, no npm, works offline. |
 | [`comb-pdf-form-filling`](skills/comb-pdf-form-filling/) | An official PDF form has to be filled so that each character lands inside its own printed box (a comb field): IBAN, tax number, BIC, dates. Built against German Behörden, tax and bank forms, and applies to any AcroForm or flat PDF with printed boxes. |
+| [`drive-audit`](skills/drive-audit/) | Something in Google Drive is shared and you cannot tell what. Exposure in Drive lives on the ITEM, so a folder can report itself private while every file inside it is world-readable, and Drive has no view that shows you otherwise at any scale. Classifies every non-owner permission worst-first, diffs the result against a policy file where each approved share carries a reason and a date, and revokes or downgrades with a restorable snapshot written before the first deletion. Dry run until `--apply`. The classifier and its 21 offline cases run with no credentials, so you can check the logic before granting it access. |
 | [`excalidraw`](skills/excalidraw/) | A diagram has to be produced as a `.excalidraw` file and look hand-drawn: architecture, flow, sequence, tree, mind map, timeline, network. Writes a short spec and expands it deterministically, with font widths measured in a browser against the real fonts rather than guessed from a multiplier, and a linter that runs before you look. |
 
 **`human-review`.** One local page holds the card and the draft. Two marks sit on the picture, a third comments on a selected phrase, the retyped headline comes back as a before and after, and the numbered list on the right is what the agent receives:
@@ -19,6 +20,22 @@ The Agent Skills format is an open, cross-agent spec, so nothing here is tied to
 **`comb-pdf-form-filling`.** A comb field prints one box per character, and filling it as an ordinary text field puts the string across the dividers. Same value, same field, both ways:
 
 ![A comb field filled wrongly as one continuous string, and filled correctly with one glyph centred per box](docs/assets/comb-field-wrong-vs-right.png)
+
+**`drive-audit`.** The report is the output, so the honest illustration is the report itself:
+`scripts/example_report.py` prints this from invented findings, with no Drive and no credentials, and
+you can rerun it to see exactly what went in.
+
+```
+=== public_indexed: 1 item(s), 0 folder(s) -- PUBLIC and search-indexed (anyone can find it)
+  !     Old proposal.pdf                        reader   anyone            0B_EXAMPLE_INDEXED
+=== external_writer: 1 item(s), 1 folder(s) -- a person outside the account can EDIT it
+  ! DIR Handover                                writer   contractor@elsewhere.example
+=== approved by policy: 1 item(s) suppressed
+        Filing 2024.xlsx    advisor@example.com    outside accountant (since 2026-05-26)
+
+scanned 8 item(s); reached 7 item(s) carrying a non-owner permission; 5 unapproved share(s) set
+directly, 1 inherited, 1 approved
+```
 
 ## Install
 

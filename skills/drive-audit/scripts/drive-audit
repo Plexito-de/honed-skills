@@ -1,0 +1,559 @@
+#!/usr/bin/env python3
+"""drive-audit - find everything in Google Drive that is shared, and say what was not approved.
+
+WHY
+  One folder in a My Drive held several thousand files carrying `anyoneWithLink` reader: months of
+  screenshots, each published automatically on upload by the tool that made them. The folder's own
+  ACL was clean, so nothing anybody would have thought to check showed it. A multi-terabyte Drive
+  cannot be reviewed by eye, and Drive's UI has no "show me everything that is shared" view.
+
+  So this exists to answer one question on demand and once a year: who can see what, and which of
+  that did the owner actually approve. The approved half lives in a policy file with a reason and a
+  date per entry, so the yearly run reads as a diff instead of an inventory.
+
+USAGE
+  drive-audit scan                      # fast: the four public/domain visibility classes
+  drive-audit scan --deep               # + every owned item and both shared drives (slow, yearly)
+  drive-audit scan --json out.json      # full findings, machine readable
+  drive-audit folder <FOLDER_ID>        # one folder and its direct children
+  drive-audit revoke --under <ID>       # DRY RUN by default: prints what it would remove
+  drive-audit revoke --under <ID> --apply    # writes a restorable snapshot, then removes
+  drive-audit policy                    # where the policy file is looked for, and what loaded
+  drive-audit --selftest                # offline, no credentials, no Google libraries
+
+EXIT CODES
+  0  nothing unapproved
+  1  unapproved shares found, or nothing could be scanned (an empty pass is a failure, not a pass)
+
+AUTH
+  A service-account key in $DRIVE_AUDIT_CREDENTIALS (with $DRIVE_AUDIT_IMPERSONATE to delegate), or
+  $GOOGLE_APPLICATION_CREDENTIALS, or Application Default Credentials. Nothing to configure if you
+  have already run `gcloud auth application-default login`.
+
+RUNTIME
+  A command that talks to Drive needs google-auth and google-api-python-client. If the interpreter
+  running this lacks them, it re-executes itself under the first candidate that has them, or under
+  $DRIVE_AUDIT_PYTHON. `--selftest` needs none of it and runs under any interpreter.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+# NO BYTECODE, and this is not a micro-optimisation. Importing a sibling module writes a
+# __pycache__/*.pyc next to it, inside the skill folder, and a compiled binary in a skill folder is
+# reported HIGH by a skill scanner at a score floor that alone reads DO_NOT_INSTALL. Deleting it does
+# not help: it returns the next time anybody runs this. So the folder stays pure text by never
+# producing bytecode in the first place. Must be set BEFORE the import below.
+sys.dont_write_bytecode = True
+
+# The library is a SIBLING of this file, and `.resolve()` is load-bearing: the documented way to run
+# this is a bare `drive-audit` on PATH, which is a symlink, and without resolving it the import would
+# look next to the symlink instead of next to the code.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import gdrive_sharing as gs  # noqa: E402
+
+SNAPSHOT_DIR = Path.home() / ".local" / "share" / "drive-audit"
+# Where to find an interpreter that HAS the Google libraries, most specific first. The environment
+# variable is the answer for anyone whose venv is somewhere else; the rest are conveniences so the
+# common cases need no configuration at all.
+VENV_CANDIDATES = (
+    os.environ.get("DRIVE_AUDIT_PYTHON", ""),
+    str(Path.home() / ".local" / "share" / "drive-audit" / "venv" / "bin" / "python"),
+    str(Path.home() / ".venv" / "bin" / "python"),
+)
+REEXEC_FLAG = "DRIVE_AUDIT_REEXECED"
+
+
+def _need_google() -> None:
+    """Re-exec under the Google venv, once, when the system Python cannot reach Drive.
+
+    Guarded by an environment flag rather than by a path comparison. A candidate interpreter that
+    exists but still lacks the libraries would otherwise re-exec itself endlessly, and that presents
+    to the caller as a hang rather than as an error, which is the worst way for this to fail.
+    """
+    try:
+        import googleapiclient  # noqa: F401, PLC0415
+    except ImportError:
+        venv = next((c for c in VENV_CANDIDATES if c and Path(c).is_file()), None)
+        if os.environ.get(REEXEC_FLAG) or venv is None:
+            raise SystemExit(
+                "The Google API libraries are missing, and no interpreter with them was found.\n"
+                "  install them where this runs:\n"
+                "    python3 -m pip install google-auth google-api-python-client\n"
+                "  or point DRIVE_AUDIT_PYTHON at an interpreter that already has them.\n"
+                "  --selftest needs none of this and runs anywhere."
+            ) from None
+        interpreter = Path(venv)
+        # S606: no shell, and the target is a path that was just checked with is_file(). argv is
+        # this process's own argv, re-passed unchanged.
+        os.execve(  # noqa: S606
+            str(interpreter),
+            [str(interpreter), str(Path(__file__).resolve()), *sys.argv[1:]],
+            {**os.environ, REEXEC_FLAG: "1"},
+        )
+
+
+def _report_change(result: gs.ChangeResult, verb: str) -> int:
+    """Print the four outcomes apart, and let the exit code follow only the real ones."""
+    print(
+        f"\n{result.changed} permission(s) {verb}; {result.already} needed no change; "
+        f"{len(result.blocked_by_ancestor)} are decided by an ancestor folder; "
+        f"{len(result.errors)} real error(s)"
+    )
+    if result.blocked_by_ancestor:
+        # Split by the reason Drive gave, because the two mean different next actions and printing
+        # one paragraph for both left the reader to guess which case they were in.
+        inherited = [r for r in result.blocked_by_ancestor if r.startswith("cannotModify")]
+        orphaned = [r for r in result.blocked_by_ancestor if r.startswith("cannotDelete")]
+        print("\nThese are NOT failures. Drive refuses to remove a grant below the level it was set on.")
+        if inherited:
+            print(
+                f"\n  {len(inherited)} inherited from a REACHABLE folder "
+                "(cannotModifyInheritedPermission).\n"
+                "  Re-run against that folder and every descendant follows in one call:\n"
+                "      drive-audit revoke --file <FOLDER_ID> --apply"
+            )
+            for line in inherited[:3]:
+                print(f"      {line}")
+        if orphaned:
+            print(
+                f"\n  {len(orphaned)} on ORPHANED items (cannotDeletePermission).\n"
+                "  The folder the grant was set on no longer exists, so NO call at any reachable\n"
+                "  level can remove it. The only fix is to move the items into a folder you\n"
+                "  control, which breaks the inheritance. That reorganises a Drive, so it is a\n"
+                "  decision rather than a cleanup step. Confirm with:  drive-audit folder <ID>"
+            )
+            for line in orphaned[:3]:
+                print(f"      {line}")
+    for line in result.errors[:20]:
+        print(f"  ! {line}")
+    if len(result.errors) > 20:
+        print(f"  … {len(result.errors) - 20} more error(s)")
+    return 1 if result.errors else 0
+
+
+def _progress(label: str):
+    def report(count: int) -> None:
+        print(f"  … {label}: {count} item(s)", flush=True)
+
+    return report
+
+
+def _finish(
+    findings: list[gs.Finding],
+    scanned: int,
+    owner: str,
+    policy: gs.Policy,
+    args,
+    foreign: int = 0,
+) -> int:
+    if scanned == 0:
+        print("nothing was scanned: no item came back from Drive, so this audit measured nothing")
+        return 1
+
+    marked = gs.mark_inherited(findings)
+    if foreign:
+        print(
+            f"note: {foreign} item(s) in this result set are owned by SOMEBODY ELSE and were not "
+            "classified. Their sharing is not yours to fix."
+        )
+    print(
+        f"note: {marked} finding(s) proved inheritable from a parent folder in this result set. "
+        "files.list does not return permissionDetails, so anything else is reported as direct "
+        "even when it may not be."
+    )
+    print()
+
+    for line in gs.render(
+        findings,
+        scanned=scanned,
+        owner_email=owner,
+        policy=policy,
+        show_approved=args.show_approved,
+        limit=args.limit,
+    ):
+        print(line)
+
+    if args.json:
+        payload = [
+            {
+                "file_id": f.file_id,
+                "name": f.name,
+                "mime_type": f.mime_type,
+                "is_folder": f.is_folder,
+                "parents": list(f.parents),
+                "link": f.link,
+                "permission_id": f.permission_id,
+                "kind": f.kind,
+                "role": f.role,
+                "principal": f.principal,
+                "inherited": f.inherited,
+                "approved_reason": f.approved_reason,
+            }
+            for f in findings
+        ]
+        Path(args.json).write_text(json.dumps(payload, indent=2, ensure_ascii=False), "utf-8")
+        print(f"\nfull findings -> {args.json}")
+
+    # The exit code follows `approved` ONLY. `inherited` is a display hint whose inference cannot
+    # distinguish an inherited grant from a second independent grant to the same person, so letting
+    # it clear the exit code would let a real share pass as clean. See gdrive_sharing.mark_inherited.
+    unapproved = [f for f in findings if not f.approved]
+    return 1 if unapproved else 0
+
+
+def cmd_scan(args) -> int:
+    _need_google()
+    owner = gs.whoami_email()
+    policy = gs.load_policy(Path(args.policy) if args.policy else None)
+
+    seen: dict[str, dict] = {}
+    for visibility in gs.VISIBILITY_CLASSES:
+        items = gs.fetch_visibility(visibility)
+        print(f"  {visibility}: {len(items)} item(s)", flush=True)
+        for item in items:
+            seen[item["id"]] = item
+
+    if args.deep:
+        print("  deep scan: every owned item (this is the slow half)", flush=True)
+        for item in gs.fetch_owned(progress=_progress("owned")):
+            seen.setdefault(item["id"], item)
+        for drive in gs.list_shared_drives():
+            print(f"  shared drive {drive['name']}", flush=True)
+            # The drive's OWN ACL, as a synthetic root item. Its members are where most shared-drive
+            # access lives and no file inside carries their grant, so without this the membership is
+            # invisible. Injected as an item so it classifies and prints like any other row.
+            drive_acl = gs.fetch_drive_acl(drive["id"])
+            if drive_acl:
+                seen.setdefault(
+                    drive["id"],
+                    {
+                        "id": drive["id"],
+                        "name": f"{drive['name']} (shared drive, its own members)",
+                        "mimeType": gs.FOLDER_MIME_TYPE,
+                        "parents": [],
+                        "ownedByMe": True,
+                        "webViewLink": f"https://drive.google.com/drive/folders/{drive['id']}",
+                        "permissions": drive_acl,
+                    },
+                )
+            for item in gs.fetch_shared_drive(drive["id"], progress=_progress(drive["name"])):
+                seen.setdefault(item["id"], item)
+
+    print()
+    owned, foreign = gs.owned_only(seen.values())
+    findings = gs.classify(owned, policy, owner)
+    return _finish(findings, len(seen), owner, policy, args, foreign=len(foreign))
+
+
+def cmd_folder(args) -> int:
+    _need_google()
+    owner = gs.whoami_email()
+    policy = gs.load_policy(Path(args.policy) if args.policy else None)
+
+    parent = (
+        gs._service()
+        .files()
+        .get(fileId=args.folder_id, fields=gs.SHARING_FIELDS, supportsAllDrives=True)
+        .execute()
+    )
+    children = gs.fetch_children(args.folder_id)
+    print(f"folder:  {parent.get('name')}  ({len(children)} direct child(ren))\n")
+
+    owned, foreign = gs.owned_only([parent, *children])
+    findings = gs.classify(owned, policy, owner)
+    return _finish(findings, len(children) + 1, owner, policy, args, foreign=len(foreign))
+
+
+def _select(args, owner: str, policy: gs.Policy) -> tuple[list[gs.Finding], str, int]:
+    """Resolve the selector flags into the findings they target.
+
+    Three selectors because three different questions get asked, and one cannot stand in for
+    another: `--under` for a folder full of published files, `--file` for a share set ON an item
+    (a folder's own ACL is invisible to `--under`), `--principal` for "this person should not have
+    access any more".
+    """
+    items: list[dict] = []
+    scopes: list[str] = []
+
+    if args.under:
+        items += gs.fetch_children(args.under)
+        scopes.append(f"direct children of {args.under}")
+    if args.file:
+        items += gs.fetch_files(args.file)
+        scopes.append(f"{len(args.file)} named item(s)")
+    if args.principal:
+        for email in args.principal:
+            items += gs.fetch_principal(email)
+        scopes.append(f"everything shared with {', '.join(args.principal)}")
+    if not scopes:
+        if getattr(args, "apply", False) and not getattr(args, "all", False):
+            raise SystemExit(
+                "Refusing to act on the WHOLE ACCOUNT from a missing flag.\n"
+                "  With no --under, --file or --principal, the scope is every publicly shared item\n"
+                "  you own. That is a real thing to want and a terrible thing to do by accident, so\n"
+                "  it needs --all said out loud. Or name a scope."
+            )
+        for visibility in ("anyoneCanFind", "anyoneWithLink"):
+            items += gs.fetch_visibility(visibility)
+        scopes.append("every publicly shared item in the account")
+
+    unique = {item["id"]: item for item in items}
+    # absent_is_mine=False on the ACT path. Drive omits `ownedByMe` for shared-drive items, so an
+    # absent value is ambiguous, and deleting a permission on something we may not own is the one
+    # mistake whose blast radius is outside this account.
+    owned, unprovable = gs.owned_only(unique.values(), absent_is_mine=False)
+    if unprovable:
+        print(
+            f"note: {len(unprovable)} item(s) in this scope are not provably yours (Drive omits "
+            "ownership for shared-drive items). They are NOT touched. Audit them with `scan --deep`."
+        )
+    classified = gs.classify(owned, policy, owner)
+    gs.mark_inherited(classified)
+
+    if args.principal:
+        wanted = {e.lower() for e in args.principal}
+        findings = [f for f in classified if f.principal in wanted]
+    elif args.file:
+        # A file named ON THE COMMAND LINE is explicit intent, so every non-owner grant on it is in
+        # scope, not just the public ones. The documented remedy for an inherited external grant
+        # sends the reader here, and with a public-only filter that command matched nothing and the
+        # tool answered "nothing to revoke" about an item that was plainly shared.
+        named = set(args.file)
+        findings = [f for f in classified if f.file_id in named]
+    else:
+        # A BULK scope stays public-only. --under and the no-selector case can sweep thousands of
+        # items, and widening them to every grant would turn one flag into mass removal of access
+        # that people are actively using. Name the principal or the file to go further.
+        findings = [f for f in classified if f.kind in ("public_indexed", "public_link")]
+
+    findings = [f for f in findings if not f.approved]
+
+    # ORDER, never filter. Acting on a folder first means Drive removes its descendants' inherited
+    # access in one call, so folders and ancestor-free rows go first. The rest are still ATTEMPTED,
+    # because the only test available here cannot tell an inherited grant from a second independent
+    # grant to the same person, and dropping one of those would silently spare a real share. Drive
+    # settles it: a genuinely inherited target returns a 403 that `revoke` counts as not-an-error.
+    kept, covered = gs.drop_covered_by_ancestor(findings, unique.values())
+    covered_rows = [f for f in findings if f not in kept]
+    findings = kept + covered_rows
+    if covered:
+        print(
+            f"note: {covered} permission(s) have the same grantee on a parent folder, so they are "
+            "attempted last. Drive removes a descendant's inherited access when the folder's grant "
+            "goes, and refuses it individually, which is reported as not-an-error rather than a "
+            "failure."
+        )
+    return findings, "; ".join(scopes), len(unique)
+
+
+def cmd_revoke(args) -> int:
+    _need_google()
+    owner = gs.whoami_email()
+    policy = gs.load_policy(Path(args.policy) if args.policy else None)
+    findings, scope, scanned = _select(args, owner, policy)
+
+    print(f"scope:   {scope}")
+    print(f"scanned: {scanned} item(s)")
+    print(f"target:  {len(findings)} permission(s) to remove\n")
+
+    if not findings:
+        print("nothing to revoke: no unapproved permission in this scope")
+        return 0
+
+    if args.apply and args.max_changes and len(findings) > args.max_changes:
+        raise SystemExit(
+            f"Refusing: {len(findings)} permission(s) is above the --max-changes ceiling of "
+            f"{args.max_changes}.\n"
+            "  A number far larger than you expected is the signal that the scope is wrong, and it\n"
+            "  is cheaper to re-read the scope than to restore from a snapshot. Raise the ceiling\n"
+            "  deliberately if the number is right."
+        )
+
+    if not args.apply:
+        dry = gs.revoke(findings, dry_run=True)
+        print(
+            f"\nDRY RUN: {dry.changed} permission(s) would be removed. "
+            "Re-run with --apply to do it."
+        )
+        return 0
+
+    snapshot = gs.write_snapshot(findings, gs.snapshot_path(SNAPSHOT_DIR))
+    print(f"snapshot written BEFORE any change: {snapshot}")
+    print("every removed permission can be re-created from that file.\n")
+
+    result = gs.revoke(findings, dry_run=False)
+    return _report_change(result, "removed")
+
+
+def cmd_downgrade(args) -> int:
+    """Take write away without taking access away. A different decision from revoking."""
+    _need_google()
+    owner = gs.whoami_email()
+    policy = gs.load_policy(Path(args.policy) if args.policy else None)
+    findings, scope, scanned = _select(args, owner, policy)
+    to_change = [f for f in findings if f.role != args.to]
+
+    print(f"scope:   {scope}")
+    print(f"scanned: {scanned} item(s)")
+    print(f"target:  {len(to_change)} permission(s) to set to '{args.to}'\n")
+
+    if not to_change:
+        print(f"nothing to do: every matching permission is already '{args.to}'")
+        return 0
+
+    if args.apply and args.max_changes and len(to_change) > args.max_changes:
+        raise SystemExit(
+            f"Refusing: {len(to_change)} permission(s) is above the --max-changes ceiling of "
+            f"{args.max_changes}. Raise it deliberately if the number is right."
+        )
+
+    if not args.apply:
+        dry = gs.change_role(to_change, args.to, dry_run=True)
+        print(
+            f"\nDRY RUN: {dry.changed} permission(s) would change. Re-run with --apply to do it."
+        )
+        return 0
+
+    snapshot = gs.write_snapshot(to_change, gs.snapshot_path(SNAPSHOT_DIR))
+    print(f"snapshot written BEFORE any change: {snapshot}")
+    print("the original roles are in that file.\n")
+
+    result = gs.change_role(to_change, args.to, dry_run=False)
+    return _report_change(result, f"set to '{args.to}'")
+
+
+def cmd_policy(args) -> int:
+    policy = gs.load_policy(Path(args.policy) if args.policy else None)
+    print("looked for a policy file at, in order:")
+    for candidate in gs.policy_candidates():
+        print(f"  {'FOUND ' if candidate.is_file() else '      '}{candidate}")
+    print(f"\nloaded: {policy.source}")
+    print(
+        f"  {len(policy.principals)} principal(s), {len(policy.public)} published file(s), "
+        f"{len(policy.trees)} tree(s), {len(policy.domains)} domain(s)"
+    )
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="drive-audit",
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--selftest", action="store_true", help="offline checks, then exit")
+    sub = parser.add_subparsers(dest="cmd")
+
+    def common(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--policy", help="policy file (default: see `drive-audit policy`)")
+        p.add_argument("--json", help="write every finding to this file")
+        p.add_argument("--limit", type=int, default=20, help="rows printed per class (default 20)")
+        p.add_argument("--show-approved", action="store_true", help="list the suppressed rows too")
+
+    p_scan = sub.add_parser("scan", help="audit the account")
+    p_scan.add_argument(
+        "--deep",
+        action="store_true",
+        help="also enumerate every owned item and both shared drives: the only way to find "
+        "shares to specific people, and slow",
+    )
+    common(p_scan)
+    p_scan.set_defaults(fn=cmd_scan)
+
+    p_folder = sub.add_parser("folder", help="audit one folder and its direct children")
+    p_folder.add_argument("folder_id")
+    common(p_folder)
+    p_folder.set_defaults(fn=cmd_folder)
+
+    def selectors(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--under", help="the direct children of this folder id")
+        p.add_argument(
+            "--file",
+            action="append",
+            metavar="ID",
+            help="a specific item id, repeatable. Needed for a share set ON a folder, which "
+            "--under cannot see",
+        )
+        p.add_argument(
+            "--principal",
+            action="append",
+            metavar="EMAIL",
+            help="everything shared with this address, repeatable",
+        )
+
+    p_revoke = sub.add_parser("revoke", help="remove permissions (dry run unless --apply)")
+    selectors(p_revoke)
+    p_revoke.add_argument(
+        "--all",
+        action="store_true",
+        help="required to act with no scope flag, i.e. on every public share you own",
+    )
+    p_revoke.add_argument(
+        "--max-changes",
+        type=int,
+        default=500,
+        dest="max_changes",
+        help="refuse if more than this many permissions would change (default 500, 0 disables)",
+    )
+    p_revoke.add_argument(
+        "--apply",
+        action="store_true",
+        help="actually remove them. Writes a restorable snapshot first",
+    )
+    common(p_revoke)
+    p_revoke.set_defaults(fn=cmd_revoke)
+
+    p_down = sub.add_parser(
+        "downgrade",
+        help="lower a role without removing access (dry run unless --apply)",
+    )
+    selectors(p_down)
+    p_down.add_argument(
+        "--to",
+        default="reader",
+        choices=["reader", "commenter"],
+        help="the role to set (default reader)",
+    )
+    p_down.add_argument(
+        "--all",
+        action="store_true",
+        help="required to act with no scope flag",
+    )
+    p_down.add_argument(
+        "--max-changes",
+        type=int,
+        default=500,
+        dest="max_changes",
+        help="refuse if more than this many permissions would change (default 500, 0 disables)",
+    )
+    p_down.add_argument("--apply", action="store_true", help="actually change them")
+    common(p_down)
+    p_down.set_defaults(fn=cmd_downgrade)
+
+    p_policy = sub.add_parser("policy", help="show which policy file is in effect")
+    p_policy.add_argument("--policy")
+    p_policy.set_defaults(fn=cmd_policy)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.selftest:
+        return 1 if gs.selftest() else 0
+    if not getattr(args, "fn", None):
+        parser.print_help()
+        return 2
+    return args.fn(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
