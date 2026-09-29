@@ -15,8 +15,11 @@ rules:
     reason: >-
       Driving an external media tool is the whole method of this skill: there is no way to
       decode a video without it. The child process is started from a list argument vector with
-      no shell, and the executable is resolved from PATH rather than taken from input. Every
-      other element is a literal, a path the caller passed, or a filter string this file builds
-      from its own numeric arguments after argparse has coerced them to float or int. No string
-      from a model, a video, or a file on disk ever reaches the argument vector. Rejected the alternative of a Python decoding library, which
+      no shell. Four occurrences, and they split two and two. The two in the tool resolve the
+      executable from PATH (ffmpeg, ffprobe); the two in the selftest run sys.executable on this
+      file's own resolved path, so the suite can assert what a failing run prints to a caller.
+      Every other element is a literal, a path the caller passed, a temporary directory, or a
+      filter string this file builds from its own numeric arguments after argparse has coerced
+      them to float or int. No string from a model, a video, or a file on disk ever reaches the
+      argument vector. Rejected the alternative of a Python decoding library, which
       would add a large binary dependency to do worse what one tool already does everywhere.
