@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# The copyright holder is named in the LICENSE file beside this script.
 """Draw the illustration for this skill, from nothing.
 
 Purpose: regenerate ../../docs/assets/scrolling-display-contact-sheet.png, a contact sheet of

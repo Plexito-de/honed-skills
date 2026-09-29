@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# The copyright holder is named in the LICENSE file beside this script.
 """Turn a video of a scrolling instrument display into labelled contact sheets.
 
 Purpose: extract frames at the rate of the camera itself, find the display panel in each one, score
@@ -39,8 +41,12 @@ BILINEAR = getattr(Image, "Resampling", Image).BILINEAR
 # A dark frame has almost no edges, so an edge-based sharpness score reports it as sharp.
 # Rank only frames that carry a picture at all. ALL THREE constants below, and the two-gate
 # shape they form, are taken with thanks from ADR 0008 of
-# https://github.com/andrewii23/ii23-skills (MIT), which documents the same trap: the luma
-# bounds and the histogram-spread floor are its answer, not just its first half.
+# https://github.com/andrewii23/ii23-skills, which documents the same trap: the luma bounds
+# and the histogram-spread floor are its answer, not just its first half.
+#   MIT License, Copyright (c) 2026 warodom (andrewii23).
+# No code was copied; what is reused is the two thresholds and the idea of gating before
+# ranking. The notice is here because MIT asks for the copyright line, and because a reader
+# who wants the reasoning should be able to find whose it is.
 LUMA_MIN, LUMA_MAX = 25.0, 235.0
 SPREAD_MIN = 60
 
@@ -532,6 +538,11 @@ def selftest() -> int:
         # "the frame whose panel was smallest", which is the opposite of the intent.
         sizes = [(400, 200), (900, 450), (1600, 800)]
         scores = [score_sharpness(panel_pattern(w, h), (0, 0, w, h)) for w, h in sizes]
+        # score_sharpness returns Optional, and max() over a list holding None raises a
+        # TypeError that says nothing about which size failed. Fail on the real question.
+        check("every synthetic size produced a score", all(s is not None for s in scores),
+              str(scores))
+        scores = [s for s in scores if s is not None] or [0.0]
         spread = (max(scores) - min(scores)) / (sum(scores) / len(scores))
         check(
             "score is independent of how large the panel is in frame",
@@ -622,7 +633,7 @@ def selftest() -> int:
         import subprocess as _sp
         far = _sp.run(
             [sys.executable, str(Path(__file__).resolve()), "extract", str(video),
-             str(root / "never"), "--fps", "30", "--start", "205", "--duration", "234"],
+             str(root / "never"), "--fps", "30", "--start", "900", "--duration", "60"],
             capture_output=True, text=True,
         )
         # Match the FATAL wording only. "past the end of this" also appears in the harmless

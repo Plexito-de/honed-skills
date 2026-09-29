@@ -15,7 +15,8 @@ rules:
     reason: >-
       Driving an external media tool is the whole method of this skill: there is no way to
       decode a video without it. The child process is started from a list argument vector with
-      no shell, the executable is resolved from PATH rather than taken from input, and every
-      other element is either a literal or a path the caller passed on the command line. Model
-      output never reaches it. Rejected the alternative of a Python decoding library, which
+      no shell, and the executable is resolved from PATH rather than taken from input. Every
+      other element is a literal, a path the caller passed, or a filter string this file builds
+      from its own numeric arguments after argparse has coerced them to float or int. No string
+      from a model, a video, or a file on disk ever reaches the argument vector. Rejected the alternative of a Python decoding library, which
       would add a large binary dependency to do worse what one tool already does everywhere.
