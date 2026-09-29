@@ -268,6 +268,33 @@ def score_sharpness(im: Image.Image, box: tuple[int, int, int, int]) -> float | 
 # --------------------------------------------------------------------------- sheets
 
 
+def window_count(first_t: float, last_t: float, step: float) -> int:
+    """How many windows of `step` cover [first_t, last_t], the last frame included.
+
+    Two mistakes live here and the second one hid behind the fix for the first.
+
+    `round(span / step)` truncates the tail whenever the span is not close to a whole number of
+    windows, and the loss is silent in the one way this tool must never be silent: the dropped
+    frames are outside every window, so they are neither tiled NOR counted as unread, and the
+    report states full coverage. Measured at 5.3667 s and step 1.0: five windows covering 5.0 s,
+    the last twelve frames outside all of them, and "5 of 5 windows produced a tile".
+
+    Truncate-and-add-one fixes that in real arithmetic and is still wrong in IEEE double at a
+    non-zero start. Nineteen frames from t=12.0 at 30 fps give last_t 12.6, and (12.6-12.0)/0.3
+    evaluates to 1.999999999999999, so int() takes 1, the count becomes 2, coverage ends at
+    exactly 12.6, and the half-open window excludes the final frame.
+
+    So the computed count is a starting point and the loop asserts the property it was meant to
+    have. It almost never runs twice. This is a function rather than three lines inside
+    build_sheets because the selftest has to exercise THIS code: a test that recomputes the same
+    arithmetic passes over a broken caller, which is how the first version of that test behaved.
+    """
+    windows = max(1, int((last_t - first_t) / step) + 1)
+    while first_t + windows * step <= last_t:
+        windows += 1
+    return windows
+
+
 def build_sheets(
     frames_dir: Path,
     out_dir: Path,
@@ -327,15 +354,7 @@ def build_sheets(
 
     first_t = entries[0]["t"]
     last_t = entries[-1]["t"]
-    # int(...) + 1, never round(...). Rounding to nearest truncates the tail whenever the span is
-    # not close to a whole number of windows, and the loss is silent in the one way this tool must
-    # never be silent: the dropped frames are outside every window, so they are neither tiled NOR
-    # counted as an unread window, and the report then states full coverage. Measured on a 5.3667 s
-    # span at step 1.0: round gives 5 windows covering 5.0 s, the last 12 frames fall outside every
-    # window, and the report reads "5 of 5 windows produced a tile" with empty_windows empty.
-    # Truncating and adding one puts every frame in exactly one window, at the cost of a final
-    # window that may be short, which is reported honestly if nothing lands in it.
-    windows = max(1, int((last_t - first_t) / step) + 1)
+    windows = window_count(first_t, last_t, step)
     picks = []
     empty_windows = []
     for index in range(windows):
@@ -603,6 +622,19 @@ def selftest() -> int:
             not beyond,
             f"{len(beyond)} frame(s) past {covered:.4f}s would be unread AND unreported",
         )
+
+        # The window count is computed by DIVISION, so it has to be checked where the division is
+        # inexact: a non-zero start. Both video fixtures begin at 0.0 with step 1.0, where it is
+        # exact, so neither can see this. These need no video, only the timestamps extract writes.
+        for first, n, fps, stp in ((12.0, 19, 30.0, 0.3), (0.0, 163, 30.0, 1.0), (7.5, 91, 25.0, 0.7)):
+            stamps = [first + i / fps for i in range(n)]
+            covered = first + window_count(first, stamps[-1], stp) * stp
+            outside = [t for t in stamps if t >= covered]
+            check(
+                f"no frame outside any window at start {first}, step {stp}",
+                not outside,
+                f"{len(outside)} past {covered!r}, raw quotient {(stamps[-1] - first) / stp!r}",
+            )
 
         # A backlit LCD is brighter than its body, which is the reverse of what the detector
         # assumes. Without --invert the run must say so instead of blaming the framing, which
