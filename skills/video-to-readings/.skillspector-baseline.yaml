@@ -1,7 +1,7 @@
-# Scanned with SkillSpector v2.11.1, static analysis only. Bare result: 16/100, LOW.
-# The two entries below are inherent to a correct skill of this shape. Nothing else is
-# suppressed, and the number a stranger sees is the bare one: a shipped baseline is ignored
-# unless the reader opts into it.
+# Scanned with SkillSpector v2.11.1, static analysis only. Bare result: 22/100, MEDIUM,
+# from three occurrences of one rule and one policy rule. Nothing else is suppressed, and the
+# number a stranger sees is the bare one: a shipped baseline is ignored unless the reader opts
+# into it, so this file lowers nothing for anybody but us.
 version: 2
 rules:
   - id: "LP3"

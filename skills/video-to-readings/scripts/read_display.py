@@ -37,8 +37,10 @@ BOX = getattr(Image, "Resampling", Image).BOX
 BILINEAR = getattr(Image, "Resampling", Image).BILINEAR
 
 # A dark frame has almost no edges, so an edge-based sharpness score reports it as sharp.
-# Rank only frames that carry a picture at all. The two bounds are taken, with thanks, from
-# ADR 0008 of https://github.com/andrewii23/ii23-skills (MIT), which documents the same trap.
+# Rank only frames that carry a picture at all. ALL THREE constants below, and the two-gate
+# shape they form, are taken with thanks from ADR 0008 of
+# https://github.com/andrewii23/ii23-skills (MIT), which documents the same trap: the luma
+# bounds and the histogram-spread floor are its answer, not just its first half.
 LUMA_MIN, LUMA_MAX = 25.0, 235.0
 SPREAD_MIN = 60
 
@@ -71,7 +73,9 @@ def load_font(size: int):
     for path in FONT_CANDIDATES:
         try:
             return ImageFont.truetype(path, size)
-        except OSError:
+        except (OSError, ImportError):
+            # ImportError, not only OSError: a Pillow built without FreeType raises it from
+            # truetype itself, which is the one environment where the fallback below matters.
             continue
     try:
         return ImageFont.load_default(size)
@@ -89,6 +93,26 @@ def ffmpeg(*args: str) -> None:
         sys.exit(f"ffmpeg failed:\n{proc.stderr[-2000:]}")
 
 
+def probe_duration(video: Path) -> float | None:
+    """Seconds of video, or None when ffprobe is absent or cannot tell.
+
+    None is a legitimate answer and never an error: a container without a duration header
+    exists, and refusing to extract from one would be worse than the mistake this prevents.
+    """
+    exe = shutil.which("ffprobe")
+    if not exe:
+        return None
+    proc = subprocess.run(
+        [exe, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(video)],
+        capture_output=True,
+        text=True,
+    )
+    try:
+        return float(proc.stdout.strip())
+    except (TypeError, ValueError):
+        return None
+
+
 # --------------------------------------------------------------------------- extract
 
 
@@ -99,6 +123,23 @@ def extract(video: Path, out: Path, start: float, duration: float | None, fps: f
     the extraction command. A hardcoded start-plus-index-over-fps in the labelling step is wrong
     the moment either value changes, and nothing errors: every label is simply off.
     """
+    # Check the start against the real length FIRST. The friendly message further down is
+    # unreachable when --start is past the end: ffmpeg returns non-zero, ffmpeg() exits on it,
+    # and all the user sees is "Terminating thread with return code -22 (Invalid argument)"
+    # and "Conversion failed!", which names neither the start time nor the video. This is the
+    # likeliest first mistake, because the documented example carries a --start of its own.
+    length = probe_duration(video)
+    if length is not None and start >= length:
+        sys.exit(
+            f"--start {start}s is past the end of this {length:.1f}s video, so there is "
+            "nothing to extract. Drop --start and --duration to take the whole clip."
+        )
+    if length is not None and duration is not None and start + duration > length + 0.5:
+        print(
+            f"NOTE: --start {start} plus --duration {duration} runs past the end of this "
+            f"{length:.1f}s video. Extracting to the end instead."
+        )
+
     out.mkdir(parents=True, exist_ok=True)
     for old in out.glob("f_*.jpg"):
         old.unlink()
@@ -126,13 +167,21 @@ def extract(video: Path, out: Path, start: float, duration: float | None, fps: f
 # --------------------------------------------------------------------------- detect
 
 
-def detect_panel(im: Image.Image) -> tuple[int, int, int, int] | None:
+def detect_panel(im: Image.Image, invert: bool = False) -> tuple[int, int, int, int] | None:
     """Return the bounding box of the display panel, or None when there is no panel.
 
     A resize to one pixel wide with a BOX filter IS the per-row mean, and to one pixel high
     is the per-column mean. That is the whole reason this needs no array library.
+
+    The search is for a region DARKER than its surroundings, which is a non-backlit LCD read
+    in ambient light. A backlit panel is the other way round and every frame then comes back
+    with no panel, so `invert` flips the greyscale first and the same logic finds it. The
+    caller decides; `build_sheets` probes for it and says so rather than leaving the user to
+    guess, because the failure looks exactly like bad framing and is not.
     """
     grey = im.convert("L")
+    if invert:
+        grey = grey.point(lambda v: 255 - v)
     width, height = grey.size
     small_w = 320
     small_h = max(1, round(small_w * height / width))
@@ -213,6 +262,7 @@ def build_sheets(
     per_sheet: int,
     cols: int,
     cell: tuple[int, int],
+    invert: bool = False,
 ) -> dict:
     """Tile the sharpest usable frame per time window, and report what was NOT covered."""
     manifest = json.loads((frames_dir / "manifest.json").read_text())
@@ -226,7 +276,7 @@ def build_sheets(
     for entry in entries:
         with Image.open(frames_dir / entry["file"]) as im:
             im.load()
-            box = detect_panel(im)
+            box = detect_panel(im, invert=invert)
             if box is None:
                 no_panel += 1
                 continue
@@ -237,7 +287,30 @@ def build_sheets(
             scored.append((entry["t"], entry["file"], sharp, box))
 
     if not scored:
-        sys.exit("No frame carried a readable panel. Fix the framing before reading anything.")
+        # "Fix the framing" is the wrong advice more than half the time, and it costs the user a
+        # re-shoot they did not need: a backlit panel is BRIGHTER than its body, which is the
+        # opposite of what the detector looks for, and a perfectly framed clip then reports
+        # nothing at all. So probe the inverse before blaming the camera.
+        if not invert:
+            probe = entries[:: max(1, len(entries) // 12)][:12]
+            hits = 0
+            for entry in probe:
+                with Image.open(frames_dir / entry["file"]) as im:
+                    im.load()
+                    if detect_panel(im, invert=True) is not None:
+                        hits += 1
+            if hits >= len(probe) // 2:
+                sys.exit(
+                    f"No frame carried a readable panel, but {hits} of {len(probe)} sampled "
+                    "frames DO carry one when the image is inverted. Your panel is lighter "
+                    "than the device around it, which is a backlit LCD. The framing is fine. "
+                    "Re-run this command with --invert."
+                )
+        sys.exit(
+            "No frame carried a readable panel, with and without --invert. The detector needs a "
+            "panel that contrasts with the body around it and fills at least a quarter of the "
+            "frame width. Check the framing and the lighting before reading anything."
+        )
 
     first_t = entries[0]["t"]
     last_t = entries[-1]["t"]
@@ -294,7 +367,7 @@ def build_sheets(
         sheet = Image.new("RGB", (cols * cell_w, rows * cell_h), "white")
         for i, tile in enumerate(tiles):
             sheet.paste(tile, ((i % cols) * cell_w, (i // cols) * cell_h))
-        path = out_dir / f"sheet_{len(sheets) + 1:02d}.jpg"
+        path = out_dir / f"sheet_{len(sheets) + 1:03d}.jpg"
         sheet.save(path, quality=88)
         sheets.append(path.name)
 
@@ -466,7 +539,7 @@ def selftest() -> int:
         expected = [f"f_{i:06d}.jpg" for i in (16, 46, 76, 106, 136, 166)]
         check("one tile per second, the unblurred MIDDLE frame", picked == expected, str(picked))
         check("no window left empty", not report["empty_windows"], str(report["empty_windows"]))
-        with Image.open(root / "sheets" / "sheet_01.jpg") as im:
+        with Image.open(root / "sheets" / "sheet_001.jpg") as im:
             size = im.size
         check("sheet is 2100x840", size == (2100, 840), str(size))
 
@@ -513,6 +586,57 @@ def selftest() -> int:
             f"{len(beyond)} frame(s) past {covered:.4f}s would be unread AND unreported",
         )
 
+        # A backlit LCD is brighter than its body, which is the reverse of what the detector
+        # assumes. Without --invert the run must say so instead of blaming the framing, which
+        # is the wrong advice and costs a re-shoot; with --invert it must simply work.
+        # The documented example carries a --start of its own, so a stranger with a short clip
+        # copies it. Before this check the only output was ffmpeg's "return code -22".
+        probed = probe_duration(video)
+        check("the video's real length is probed", probed is not None and 5.9 < probed < 6.2,
+              f"{probed}")
+        import subprocess as _sp
+        far = _sp.run(
+            [sys.executable, str(Path(__file__).resolve()), "extract", str(video),
+             str(root / "never"), "--fps", "30", "--start", "205", "--duration", "234"],
+            capture_output=True, text=True,
+        )
+        # Match the FATAL wording only. "past the end of this" also appears in the harmless
+        # NOTE printed when start+duration overruns, so the looser check passed with the fatal
+        # guard deleted: two code paths, one substring, and a mutant walked straight through it.
+        far_out = far.stderr + far.stdout
+        check(
+            "a --start past the end names the start and the length, not ffmpeg's errno",
+            far.returncode != 0 and "so there is nothing to extract" in far_out,
+            far_out.strip().splitlines()[-1][:90] if far_out.strip() else "(no output)",
+        )
+
+        print("fixture with a BRIGHT panel on a dark body:")
+        bright = root / "bright.mp4"
+        ffmpeg(
+            "-f", "lavfi", "-i", "color=c=0x202020:s=900x440:r=30:d=3",
+            "-vf", "drawbox=x=150:y=120:w=600:h=200:color=0xD8E8D0:t=fill,"
+                   "drawbox=x=200:y=170:w=60:h=100:color=0x102010:t=fill,"
+                   "drawbox=x=300:y=170:w=60:h=100:color=0x102010:t=fill",
+            "-pix_fmt", "yuv420p", "-c:v", "libx264", str(bright),
+        )
+        bright_frames = root / "brframes"
+        extract(bright, bright_frames, start=0.0, duration=None, fps=10.0)
+        with Image.open(sorted(bright_frames.glob("f_*.jpg"))[0]) as im:
+            im.load()
+            plain = detect_panel(im)
+            flipped = detect_panel(im, invert=True)
+        check("a bright panel is invisible to the default detector", plain is None, str(plain))
+        check("the same panel is found with invert", flipped is not None, str(flipped))
+        bright_report = build_sheets(
+            bright_frames, root / "brsheets", step=1.0, per_sheet=20, cols=3,
+            cell=(700, 420), invert=True,
+        )
+        check(
+            "invert recovers every window of a backlit clip",
+            bright_report["picked"] == bright_report["windows"],
+            f"{bright_report['picked']} of {bright_report['windows']}",
+        )
+
         print("fixture with NO panel:")
         blank = root / "blank.mp4"
         make_fixture(blank, with_panel=False)
@@ -548,7 +672,9 @@ def main() -> int:
         "extract", help="frames plus the manifest that pins each frame to a timestamp"
     )
     extract_cmd.add_argument("video", type=Path)
-    extract_cmd.add_argument("out", type=Path)
+    extract_cmd.add_argument(
+        "out", type=Path, help="frame directory. Any existing f_*.jpg in it is DELETED first"
+    )
     extract_cmd.add_argument("--start", type=float, default=0.0)
     extract_cmd.add_argument("--duration", type=float, default=None)
     extract_cmd.add_argument(
@@ -559,11 +685,18 @@ def main() -> int:
         "sheets", help="labelled contact sheets, sharpest usable frame per window"
     )
     sheets_cmd.add_argument("frames", type=Path)
-    sheets_cmd.add_argument("out", type=Path)
+    sheets_cmd.add_argument(
+        "out", type=Path, help="sheet directory. Any existing sheet_*.jpg in it is DELETED first"
+    )
     sheets_cmd.add_argument("--step", type=float, required=True, help="seconds per window")
     sheets_cmd.add_argument("--per-sheet", type=int, default=20)
     sheets_cmd.add_argument("--cols", type=int, default=4)
     sheets_cmd.add_argument("--cell", type=int, nargs=2, default=(700, 420), metavar=("W", "H"))
+    sheets_cmd.add_argument(
+        "--invert",
+        action="store_true",
+        help="the panel is LIGHTER than the device around it, which is any backlit LCD",
+    )
 
     sub.add_parser("selftest", help="prove the whole path on a generated fixture")
 
@@ -573,7 +706,8 @@ def main() -> int:
         return 0
     if args.cmd == "sheets":
         build_sheets(
-            args.frames, args.out, args.step, args.per_sheet, args.cols, tuple(args.cell)
+            args.frames, args.out, args.step, args.per_sheet, args.cols, tuple(args.cell),
+            invert=args.invert,
         )
         return 0
     if args.cmd == "selftest":

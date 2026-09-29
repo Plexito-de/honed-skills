@@ -15,7 +15,7 @@ compatibility: >-
   credentials at all. Credentials come from Application Default Credentials or a service-account
   key named by an environment variable; no product-specific tooling and no agent-specific paths.
 metadata:
-  version: "1.1"
+  version: "1.1.0"
   changeSummary: Added the frontmatter changelog fields. The method, the scripts and the examples are unchanged.
   isBreaking: false
 ---

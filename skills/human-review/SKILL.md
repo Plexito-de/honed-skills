@@ -7,7 +7,7 @@ description: >-
   newsletter, landing page, deck, invitation, poster, chart, rendered design, screenshot.
 license: Apache-2.0
 metadata:
-  version: "1.1"
+  version: "1.1.0"
   changeSummary: Added the frontmatter changelog fields, and moved the description to a block scalar because it contained an unquoted colon and was therefore not valid YAML. This skill shipped without a declared version, so the first declared one is 1.1. The method is unchanged.
   isBreaking: false
 ---

@@ -24,7 +24,12 @@ from PIL import Image, ImageDraw, ImageFont
 # copies out stays text-only: a bundled binary a security scanner cannot read is reported
 # HIGH at fixed confidence, once per reference. parents[3] is the repository root publicly
 # and the private skills root privately, and docs/assets exists in both.
-ASSETS = Path(__file__).resolve().parents[3] / "docs" / "assets"
+_REPO_ASSETS = Path(__file__).resolve().parents[3] / "docs" / "assets"
+# ...but only when that directory really is the repository's. Copy the skill folder alone into
+# an agent's skills directory, which is the install the README documents, and parents[3] climbs
+# out into the home directory, where writing a docs/assets the user never asked for would be a
+# tool putting files outside anything it was pointed at. Fall back to the working directory.
+ASSETS = _REPO_ASSETS if _REPO_ASSETS.is_dir() else Path.cwd()
 
 CELL = (420, 260)
 COLS = 3

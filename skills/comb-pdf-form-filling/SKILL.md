@@ -4,7 +4,7 @@ description: Use when filling an official PDF form to print, sign or submit, and
 license: Apache-2.0
 compatibility: Requires Python 3.9+ with pypdf, reportlab and pdfplumber, plus qpdf and poppler's pdftoppm on PATH. Agent-agnostic, no product-specific tooling.
 metadata:
-  version: "1.2"
+  version: "1.2.0"
   changeSummary: Added the frontmatter changelog fields. The method, the scripts and the illustration are unchanged.
   isBreaking: false
 ---
