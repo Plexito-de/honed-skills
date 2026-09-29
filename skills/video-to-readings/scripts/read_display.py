@@ -123,6 +123,13 @@ def extract(video: Path, out: Path, start: float, duration: float | None, fps: f
     the extraction command. A hardcoded start-plus-index-over-fps in the labelling step is wrong
     the moment either value changes, and nothing errors: every label is simply off.
     """
+    # Nothing is deleted until the input has been checked. Measured against the version before
+    # this line: pointing the command at a video that does not exist still unlinked the
+    # pre-existing f_*.jpg in the output directory and then failed, so the user paid a delete
+    # and got nothing back. An input error must never cost the caller data.
+    if not video.is_file():
+        sys.exit(f"{video} is not a file, so nothing was read and nothing was deleted.")
+
     # Check the start against the real length FIRST. The friendly message further down is
     # unreachable when --start is past the end: ffmpeg returns non-zero, ffmpeg() exits on it,
     # and all the user sees is "Terminating thread with return code -22 (Invalid argument)"
@@ -589,6 +596,24 @@ def selftest() -> int:
         # A backlit LCD is brighter than its body, which is the reverse of what the detector
         # assumes. Without --invert the run must say so instead of blaming the framing, which
         # is the wrong advice and costs a re-shoot; with --invert it must simply work.
+        # An input error must not cost the caller data. Before the existence check, pointing
+        # the command at a missing video still deleted the f_*.jpg already in the output
+        # directory and then failed, so the user paid a delete and received nothing.
+        keep = root / "keepme"
+        keep.mkdir()
+        (keep / "f_000001.jpg").write_bytes(b"not mine to delete")
+        import subprocess as _sp0
+        missing = _sp0.run(
+            [sys.executable, str(Path(__file__).resolve()), "extract",
+             str(root / "no-such-video.mp4"), str(keep), "--fps", "30"],
+            capture_output=True, text=True,
+        )
+        check(
+            "a missing input deletes nothing in the output directory",
+            missing.returncode != 0 and (keep / "f_000001.jpg").exists(),
+            f"rc={missing.returncode}, file kept={(keep / 'f_000001.jpg').exists()}",
+        )
+
         # The documented example carries a --start of its own, so a stranger with a short clip
         # copies it. Before this check the only output was ffmpeg's "return code -22".
         probed = probe_duration(video)
