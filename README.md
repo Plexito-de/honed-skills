@@ -12,6 +12,7 @@ The Agent Skills format is an open, cross-agent spec, so nothing here is tied to
 | [`comb-pdf-form-filling`](skills/comb-pdf-form-filling/) | An official PDF form has to be filled so that each character lands inside its own printed box (a comb field): IBAN, tax number, BIC, dates. Built against German Behörden, tax and bank forms, and applies to any AcroForm or flat PDF with printed boxes. |
 | [`drive-audit`](skills/drive-audit/) | Something in Google Drive is shared and you cannot tell what. Exposure in Drive lives on the ITEM, so a folder can report itself private while every file inside it is world-readable, and Drive has no view that shows you otherwise at any scale. Classifies every non-owner permission worst-first, diffs the result against a policy file where each approved share carries a reason and a date, and revokes or downgrades with a restorable snapshot written before the first deletion. Dry run until `--apply`. The classifier and its 21 offline cases run with no credentials, so you can check the logic before granting it access. |
 | [`excalidraw`](skills/excalidraw/) | A diagram has to be produced as a `.excalidraw` file and look hand-drawn: architecture, flow, sequence, tree, mind map, timeline, network. Writes a short spec and expands it deterministically, with font widths measured in a browser against the real fonts rather than guessed from a multiplier, and a linter that runs before you look. |
+| [`video-to-readings`](skills/video-to-readings/) | Somebody filmed a meter, gauge or appliance while scrolling through its stored values, and every one of them has to come back out. The general video tools fail here for one measurable reason: a camera held on a display is a near-static scene, so scene-change frame selection passes no frame at all and ffmpeg still exits `0`, blaming the wrong parameter. Samples at the rate of the camera, scores sharpness in a way a dark frame cannot win, tiles the sharpest frame per window into labelled contact sheets, and reports every second it could not read, because a series is only useful if you can show nothing was missed. Pillow and ffmpeg, no OCR engine, and a mutation-tested selftest that builds its own fixtures. |
 
 **`human-review`.** One local page holds the card and the draft. Two marks sit on the picture, a third comments on a selected phrase, the retyped headline comes back as a before and after, and the numbered list on the right is what the agent receives:
 
@@ -36,6 +37,13 @@ you can rerun it to see exactly what went in.
 scanned 8 item(s); reached 7 item(s) carrying a non-owner permission; 5 unapproved share(s) set
 directly, 1 inherited, 1 approved
 ```
+
+**`video-to-readings`.** What the skill hands a model: the sharpest readable frame per time window,
+cropped to the panel, each tile stamped with its own timestamp so the order survives across sheets.
+The dimmed tile is a frame the picker rejects. Every digit below was drawn from seven-segment
+geometry by a script that ships with the skill, so nothing real went into it:
+
+![A three-by-three contact sheet. Each tile shows the same seven-segment panel carrying an index from minus one to minus nine and an invented value between 7.9 and 19.4 kWh, with its own timestamp stamped in yellow on black in the top-left corner. The fifth tile is dimmed, standing for a frame the picker rejects as unreadable.](docs/assets/scrolling-display-contact-sheet.png)
 
 ## Install
 

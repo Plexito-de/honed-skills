@@ -15,7 +15,9 @@ compatibility: >-
   credentials at all. Credentials come from Application Default Credentials or a service-account
   key named by an environment variable; no product-specific tooling and no agent-specific paths.
 metadata:
-  version: "1.0"
+  version: "1.1"
+  changeSummary: Added the frontmatter changelog fields. The method, the scripts and the examples are unchanged.
+  isBreaking: false
 ---
 
 # drive-audit: who can see what in Drive, and which of that was approved

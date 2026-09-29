@@ -4,7 +4,9 @@ description: Use when producing a diagram as a .excalidraw file, or when asked f
 license: Apache-2.0
 compatibility: Requires Python 3.9+ and nothing else for the build and the lint. PyYAML only if the spec is YAML rather than JSON. Chrome is needed to look at a render and to regenerate the font metrics, and is invoked by you rather than by any script here.
 metadata:
-  version: "1.0"
+  version: "1.1"
+  changeSummary: Added the frontmatter changelog fields. The method, the scripts and the examples are unchanged.
+  isBreaking: false
 ---
 
 # Excalidraw diagrams

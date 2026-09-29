@@ -1,7 +1,15 @@
 ---
 name: human-review
-description: Put a draft in front of the person you are working for and get their markup back in one batch: they retype text, comment on any selection, and circle or scribble on images and PDF pages with a note per mark. Use before anything they will read, print or publish: post, spec, plan, report, newsletter, landing page, deck, invitation, poster, chart, rendered design, screenshot.
+description: >-
+  Put a draft in front of the person you are working for and get their markup back in one batch:
+  they retype text, comment on any selection, and circle or scribble on images and PDF pages with
+  a note per mark. Use before anything they will read, print or publish: post, spec, plan, report,
+  newsletter, landing page, deck, invitation, poster, chart, rendered design, screenshot.
 license: Apache-2.0
+metadata:
+  version: "1.1"
+  changeSummary: Added the frontmatter changelog fields, and moved the description to a block scalar because it contained an unquoted colon and was therefore not valid YAML. This skill shipped without a declared version, so the first declared one is 1.1. The method is unchanged.
+  isBreaking: false
 ---
 
 # human-review

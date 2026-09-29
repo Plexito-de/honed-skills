@@ -1,0 +1,21 @@
+# Scanned with SkillSpector v2.11.1, static analysis only. Bare result: 16/100, LOW.
+# The two entries below are inherent to a correct skill of this shape. Nothing else is
+# suppressed, and the number a stranger sees is the bare one: a shipped baseline is ignored
+# unless the reader opts into it.
+version: 2
+rules:
+  - id: "LP3"
+    reason: >-
+      No allowed-tools by policy. A skill that declares its own tool scope pre-approves those
+      tools inside a stranger's agent and removes the human's permission decision, which this
+      repository forbids. Rejected the alternative of adding the field to satisfy the scanner:
+      that trades a real safety property for a few points.
+  - id: "AST4"
+    path: "scripts/*.py"
+    reason: >-
+      Driving an external media tool is the whole method of this skill: there is no way to
+      decode a video without it. The child process is started from a list argument vector with
+      no shell, the executable is resolved from PATH rather than taken from input, and every
+      other element is either a literal or a path the caller passed on the command line. Model
+      output never reaches it. Rejected the alternative of a Python decoding library, which
+      would add a large binary dependency to do worse what one tool already does everywhere.
