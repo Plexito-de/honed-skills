@@ -78,7 +78,7 @@ footer{position:fixed;right:0;bottom:0;width:390px;background:var(--paper);borde
 .done .tick{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;
   border-radius:50%;background:#1B7F4B;color:#fff;font-size:15px}
 .done small{display:block;font-weight:400;color:var(--mut);font-size:13px;margin-top:2px}
-body.sent #stage,body.sent #side{opacity:.5;pointer-events:none;filter:grayscale(.25)}
+body.sent #stage,body.sent aside{opacity:.5;pointer-events:none;filter:grayscale(.25)}
 #selbtn{position:fixed;z-index:50;display:none;background:var(--ink);color:#fff;border:0;
         border-radius:7px;padding:6px 11px;font:inherit;font-size:13px;cursor:pointer;
         box-shadow:0 4px 14px rgba(0,0,0,.2)}
@@ -367,9 +367,14 @@ function exportMedia(itemId) {
 /* ---------------- never lose what was typed ---------------- */
 // Everything lives in this page until Send, so a closed tab, a reload or a crash used to cost the
 // whole round. The state is posted to the server on every change, debounced, and read back on load.
-let saveTimer = null;
+// No save may start once Send is pressed. A save still pending at that moment used to land after the
+// server had deleted the draft, so the next round on the same files opened with this round's notes
+// and text, and every restored block reported itself as an edit. Measured 2026-09-30: draft.json
+// written in the same second as the Send it should not have outlived.
+let saveTimer = null, sending = false;
 function saveDraft() {
   clearTimeout(saveTimer);
+  if (sending) return;
   saveTimer = setTimeout(() => {
     const blocks = {};
     document.querySelectorAll("[data-blk]").forEach(el => { blocks[el.getAttribute("data-blk")] = el.innerHTML; });
@@ -382,16 +387,19 @@ function saveDraft() {
 }
 
 async function restoreDraft() {
-  let d = null;
+  let d = null, answered = false;
   try {
     const r = await fetch("/draft");
-    if (r.ok) d = await r.json();
+    if (r.ok) { d = await r.json(); answered = true; }
   } catch (e) {}
-  if (!d || (!d.marks?.length && !d.comments?.length && !d.overall && !d.blocks)) {
+  // A server that answers is the authority, and an empty answer means the round was sent or never
+  // started. The copy in this browser is only for a server that did not answer: after a Send, a
+  // second tab can still write one, and on a fixed port it would come back in the next round.
+  if (!answered) {
     try { d = JSON.parse(localStorage.getItem(`review:${window.__SESSION__}`) || "null"); }
     catch (e) { d = null; }
   }
-  if (!d) return;
+  if (!d || (!d.marks?.length && !d.comments?.length && !d.overall && !d.blocks)) return;
   marks = d.marks || []; comments = d.comments || [];
   seq = d.seq || Math.max(0, ...marks.map(m => m.id), ...comments.map(c => c.id));
   if (d.overall) document.getElementById("overall").value = d.overall;
@@ -416,6 +424,8 @@ document.addEventListener("keydown", e => {
 });
 
 document.getElementById("send").onclick = async () => {
+  sending = true; clearTimeout(saveTimer);   // the batch below carries this state, see saveDraft
+  document.activeElement?.blur();            // a keystroke from here on would reach neither
   document.getElementById("send").disabled = true;
   document.getElementById("status").textContent = "sending…";
   const eds = edits();
@@ -458,16 +468,27 @@ document.getElementById("send").onclick = async () => {
     foot.innerHTML = `<span class="done"><span class="tick">&#10003;</span><span>Sent.
       ${items} item${items === 1 ? "" : "s"} went to the agent.
       <small>Closing this window.</small></span></span>`;
-    // A tab the browser did not open by script cannot always be closed by script. Try anyway, and
-    // when the browser refuses, say plainly that it is finished rather than pretending it closed.
-    setTimeout(() => {
+    // A browser lets a page close its own tab only while that tab has one history entry, and it does
+    // not care what sent the batch: a review opened in a tab that already showed a page is refused,
+    // by a click and by Cmd+Enter alike. Measured 2026-09-30 in Edge. window.closed turns true at once
+    // when the browser accepts and stays false when it refuses. The server is told either way, closes
+    // a refused tab from outside where it can, and stops. A page that is still here after that says
+    // plainly that it is finished, rather than pretend it closed.
+    setTimeout(async () => {
       window.close();
+      await fetch("/close", { method: "POST", keepalive: true,
+        body: JSON.stringify({ refused: !window.closed }) }).catch(() => {});
       setTimeout(() => {
         const s = foot.querySelector(".done small");
         if (s) s.textContent = "Nothing more to do here. You can close this window.";
       }, 400);
     }, 900);
+  } else if (r.status === 409) {
+    // Another tab of this review sent first. Nothing from this tab went, and a retry cannot help.
+    document.getElementById("status").textContent =
+      "already sent from another tab, nothing from this tab was sent";
   } else {
+    sending = false; saveDraft();              // the save cancelled at Send still has to happen
     document.getElementById("send").disabled = false;
     document.getElementById("status").textContent =
       `send failed (${r.statusText || "no reply"}), your marks are still here, try again`;

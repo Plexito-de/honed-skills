@@ -23,7 +23,7 @@ Text and pictures sit on the same page on purpose. A draft is rarely only prose 
 invitation is a rendered card and its copy. A post is text and its hero image. Two surfaces split the
 reviewer's attention. They also cost a round every time an item crosses the boundary.
 
-![The review page: a launch card with a circled date badge numbered 1 and an arrow numbered 2, the draft below it with a highlighted edited heading, and a sidebar listing all four items with a typed note under each](assets/example-review.png)
+![The review page: a launch card with a circled date badge numbered 1 and an arrow numbered 2, the draft below it with a highlighted edited heading, and a sidebar listing all four items with a typed note under each](../../docs/assets/review-page-marked-up.png)
 
 One card, one draft, four items back. Everything in the picture is invented, and
 [`scripts/make_example_inputs.py`](scripts/make_example_inputs.py) rebuilds the two files behind it.
@@ -35,7 +35,7 @@ skills/human-review/bin/review open draft.md card.png form.pdf   # opens the pag
 skills/human-review/bin/review poll --session <id>               # blocks until they hit Send
 skills/human-review/bin/review poll --ack                        # clears the batch you handled
 skills/human-review/bin/review status                            # is a batch waiting
-skills/human-review/bin/review close                             # stop the server
+skills/human-review/bin/review close                             # stop a review nobody sends
 ```
 
 1. Write or render the draft.
@@ -131,6 +131,15 @@ the most expensive input in the loop. Do not spend it on a defect a tool can fin
 - The tool reviews **files**. A page from a development server is out of scope. Screenshot it, or
   review the template behind it.
 - The tool does not support video. Export a frame.
+- **Send closes the tab.** A browser lets a page close its own tab only while the tab has one
+  history entry. A review opened in a tab that already showed a page cannot close itself. On macOS
+  the server then closes that tab in Chrome or Edge. It does so only when the app the agent runs in
+  already has Automation permission for that browser. It never asks for that permission. Without
+  it, the page says the review is finished, and the tab stays open. The server stops by itself
+  after Send. Do not run `close` then, or the tab can stay open.
+- The server answers only requests addressed to `127.0.0.1` or `localhost`, and it takes a POST
+  only from its own page. Another web page cannot send a batch or read a draft. A port forward
+  keeps working.
 - Sessions live in `~/.claude/.review/<id>/`. Delete the directory to discard one.
 
 ## Credit
