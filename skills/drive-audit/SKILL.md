@@ -6,8 +6,7 @@ description: >-
   "anyone with the link", "public", "shared with", "unshare", "revoke access", "sharing audit",
   "Freigabe", "nicht mehr teilen", "nur für mich". Owns the drive-audit CLI (scan, folder, revoke,
   downgrade, policy), how to read each finding class, what counts as an approved share, and how to
-  keep a policy file so the next run is a diff rather than a re-read. Written after a folder whose
-  own sharing said "private" turned out to hold thousands of publicly linked files.
+  keep a policy file so the next run is a diff rather than a re-read.
 license: Apache-2.0
 compatibility: >-
   Requires Python 3.11+ with google-auth and google-api-python-client for anything that talks to
@@ -106,9 +105,12 @@ every owned item. Never report "nothing is shared" from a fast scan alone.
 Resolved in this order, so neither a personal account nor a delegated service account needs a code
 change:
 
-1. `$DRIVE_AUDIT_CREDENTIALS`, a service-account JSON key, optionally impersonating `$DRIVE_AUDIT_IMPERSONATE` for domain-wide delegation.
-2. `$GOOGLE_APPLICATION_CREDENTIALS`, the same thing under Google's own variable name.
-3. Application Default Credentials.
+1. `$DRIVE_AUDIT_CREDENTIALS_COMMAND`, a command that prints a service-account JSON key, for a key kept in a secret manager instead of a file (for example `doppler secrets get GOOGLE_SA_KEY --plain --project P --config C`; name the project, because the tool runs from any directory). It is split with POSIX shell rules but runs without a shell, so `$VAR` and `~` are not expanded. Its stdin is closed, and its output is never printed, not even in an error. When it is set, it wins over a key file.
+2. `$DRIVE_AUDIT_CREDENTIALS`, a service-account JSON key file.
+3. `$GOOGLE_APPLICATION_CREDENTIALS`, the same file under Google's own variable name.
+4. Application Default Credentials.
+
+A key from 1, 2 or 3 impersonates `$DRIVE_AUDIT_IMPERSONATE` when it is set, for domain-wide delegation.
 
 ### A personal Google account, in full
 

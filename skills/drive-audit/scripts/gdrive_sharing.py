@@ -35,14 +35,19 @@ verify the classification logic before granting this thing any access at all.
 
 AUTH IS A SEAM, NOT A DEPENDENCY
 --------------------------------
-One function, `_service()`, is the only place a credential is resolved, and it tries four things in
+One function, `_service()`, is the only place a credential is resolved, and it tries five things in
 order so that neither a personal Google account nor a delegated service account needs a code change:
 
   1. a factory installed with `set_service_factory()`, which is how the tests substitute a fake;
-  2. `$DRIVE_AUDIT_CREDENTIALS`, a service-account JSON key, optionally impersonating
-     `$DRIVE_AUDIT_IMPERSONATE` (domain-wide delegation);
-  3. `$GOOGLE_APPLICATION_CREDENTIALS`, the same thing under Google's own variable name;
-  4. Application Default Credentials, which is what `gcloud auth application-default login` leaves
+  2. `$DRIVE_AUDIT_CREDENTIALS_COMMAND`, a command that prints a service-account JSON key, for a key
+     kept in a secret manager rather than in a file (for example
+     `doppler secrets get KEY --plain --project P --config C`). It is split with POSIX shell rules
+     but runs without a shell, so `$VAR` and `~` are not expanded, its stdin is closed, and its
+     output is never printed, not even in an error. When it is set, it wins over a key file;
+  3. `$DRIVE_AUDIT_CREDENTIALS`, a service-account JSON key file;
+  4. `$GOOGLE_APPLICATION_CREDENTIALS`, the same file under Google's own variable name. A key from
+     2, 3 or 4 impersonates `$DRIVE_AUDIT_IMPERSONATE` when it is set (domain-wide delegation);
+  5. Application Default Credentials, which is what `gcloud auth application-default login` leaves
      behind and the path most people already have.
 
 The scope is the full `drive` scope, deliberately, and this is the single most common reason a
@@ -66,6 +71,9 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import subprocess
+import sys
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -574,6 +582,44 @@ def set_service_factory(factory: Callable[[], Any] | None) -> None:
     _service.cache_clear()
 
 
+def _key_from_command(command: str) -> dict[str, Any]:
+    """Run the credentials command and return the service-account key it prints.
+
+    Every failure exits with a message that names the command and never its output, because the
+    output is the private key.
+    """
+    # stdin is closed so a secret manager that wants to prompt fails fast instead of hanging, and
+    # every SystemExit below is raised `from None`: a TimeoutExpired carries the captured output,
+    # and a chained exception would print it in the traceback.
+    try:
+        done = subprocess.run(
+            shlex.split(command),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        raise SystemExit(
+            f"DRIVE_AUDIT_CREDENTIALS_COMMAND could not run: {type(exc).__name__}"
+        ) from None
+    if done.returncode != 0:
+        raise SystemExit(
+            f"DRIVE_AUDIT_CREDENTIALS_COMMAND exited {done.returncode}; its output is not shown "
+            "because it may hold the key."
+        )
+    try:
+        info = json.loads(done.stdout)
+    except json.JSONDecodeError:
+        info = None
+    if not isinstance(info, dict) or info.get("type") != "service_account":
+        raise SystemExit(
+            "DRIVE_AUDIT_CREDENTIALS_COMMAND did not print a service-account JSON key."
+        )
+    return info
+
+
 @cache
 def _service() -> Any:
     """The Drive client. Cached, because rebuilding it per call re-does discovery every time."""
@@ -583,12 +629,26 @@ def _service() -> Any:
     from google.oauth2 import service_account  # noqa: PLC0415
     from googleapiclient.discovery import build  # noqa: PLC0415
 
+    command = os.environ.get("DRIVE_AUDIT_CREDENTIALS_COMMAND")
     key_path = os.environ.get("DRIVE_AUDIT_CREDENTIALS") or os.environ.get(
         "GOOGLE_APPLICATION_CREDENTIALS"
     )
     subject = os.environ.get("DRIVE_AUDIT_IMPERSONATE")
 
-    if key_path:
+    if command:
+        try:
+            creds = service_account.Credentials.from_service_account_info(
+                _key_from_command(command), scopes=list(DRIVE_SCOPES)
+            )
+        except ValueError:
+            # The library's message can quote the key's fields, so it is replaced, not chained.
+            raise SystemExit(
+                "DRIVE_AUDIT_CREDENTIALS_COMMAND printed a service-account key the Google library "
+                "could not load (a field is missing or malformed)."
+            ) from None
+        if subject:
+            creds = creds.with_subject(subject)
+    elif key_path:
         resolved = Path(key_path).expanduser()
         if not resolved.is_file():
             raise SystemExit(
@@ -1309,6 +1369,71 @@ def selftest() -> int:
             "unrelated permission not marked",
             mark_inherited(classify([shared_dir, other], Policy(), me)),
             0,
+        )
+    )
+
+    # The credentials command: it must return the key it printed, and every failure must exit
+    # WITHOUT the output in the message, because that output is a private key.
+    def exit_text(fn: Callable[[], Any]) -> str | None:
+        try:
+            fn()
+        except SystemExit as exc:
+            return str(exc)
+        return None
+
+    py = shlex.quote(sys.executable)
+    fake = '{"type": "service_account", "private_key": "SECRET-MARKER"}'
+    prints_key = shlex.quote("print(" + repr(fake) + ")")
+    cases.append(
+        (
+            "credentials command returns its key",
+            _key_from_command(f"{py} -c {prints_key}").get("private_key"),
+            "SECRET-MARKER",
+        )
+    )
+    exits_3 = shlex.quote("import sys; print('SECRET-MARKER'); sys.exit(3)")
+    failing = f"{py} -c {exits_3}"
+    cases.append(
+        (
+            "a failing credentials command exits without its output",
+            (lambda t: t is not None and "SECRET-MARKER" not in t and "exited 3" in t)(
+                exit_text(lambda: _key_from_command(failing))
+            ),
+            True,
+        )
+    )
+    reads_stdin = shlex.quote("import sys; sys.stdin.read(); print(" + repr(fake) + ")")
+    cases.append(
+        (
+            "a command that reads stdin gets end-of-file, not a hang",
+            _key_from_command(f"{py} -c {reads_stdin}").get("private_key"),
+            "SECRET-MARKER",
+        )
+    )
+
+    def suppressed(fn: Callable[[], Any]) -> bool:
+        try:
+            fn()
+        except SystemExit as exc:
+            return exc.__suppress_context__ and exc.__cause__ is None
+        return False
+
+    cases.append(
+        (
+            "a missing command exits cleanly, with no chained exception",
+            suppressed(lambda: _key_from_command("/nonexistent/drive-audit-no-such-command")),
+            True,
+        )
+    )
+    prints_marker = shlex.quote("print('SECRET-MARKER')")
+    not_a_key = f"{py} -c {prints_marker}"
+    cases.append(
+        (
+            "output that is not a service-account key is refused, unprinted",
+            (lambda t: t is not None and "SECRET-MARKER" not in t)(
+                exit_text(lambda: _key_from_command(not_a_key))
+            ),
+            True,
         )
     )
 

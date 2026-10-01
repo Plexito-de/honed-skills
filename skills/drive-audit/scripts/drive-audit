@@ -26,7 +26,8 @@ EXIT CODES
   1  unapproved shares found, or nothing could be scanned (an empty pass is a failure, not a pass)
 
 AUTH
-  A service-account key in $DRIVE_AUDIT_CREDENTIALS (with $DRIVE_AUDIT_IMPERSONATE to delegate), or
+  A command that prints a service-account key in $DRIVE_AUDIT_CREDENTIALS_COMMAND, or a key file in
+  $DRIVE_AUDIT_CREDENTIALS (either with $DRIVE_AUDIT_IMPERSONATE to delegate), or
   $GOOGLE_APPLICATION_CREDENTIALS, or Application Default Credentials. Nothing to configure if you
   have already run `gcloud auth application-default login`.
 

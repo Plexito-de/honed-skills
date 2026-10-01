@@ -77,9 +77,8 @@ Every item lands in one numbered list. Their "2" is your "2", on a picture and i
 
 ### Rules for reading it
 
-- **Open every `crop`.** This is the point of the media path, and the step you are most likely to
-  skip. A box at `0.30, 0.05` tells you nothing. The crop shows you the eyebrow, the kerning, the
-  seam you got wrong. Look at the images if your model can see them. Say so rather than guess from
+- **Open every `crop`.** This is the point of the media path. A box at `0.30, 0.05` tells you
+  nothing. The crop shows you the eyebrow, the kerning, the seam you got wrong. Look at the images if your model can see them. Say so rather than guess from
   coordinates if it cannot.
 - **Open the `overview` first.** It shows what they saw while they wrote the notes.
 - **`source` is the original file.** Edit that file. The copy in the session directory is a working
