@@ -1,0 +1,97 @@
+# Accepted findings for the human-review skill, with the reason for each.
+#
+# Written by hand, not by `skillspector baseline`, because a fingerprint baseline pins line numbers
+# and says nothing about why. Every entry is a decision, and the reason is the point.
+#
+# SkillSpector does not apply a baseline a skill ships unless you pass --use-shipped-baseline, and
+# that default is right: an author's baseline can hide findings from you. So this file does not
+# change the number you see when you scan this folder. It shows what we decided, so you can
+# disagree with it.
+#
+# Scanned with SkillSpector v2.11.1, static analysis only, 2026-10-02. Bare result: 100/100,
+# CRITICAL, DO_NOT_INSTALL, and every blocking finding below is a scanner reading minified
+# JavaScript it cannot finish parsing. Read that number with the entries here, and with
+# assets/vendor/pdfjs/README.md, which says exactly which bytes came from where and how to check
+# them yourself in one command:
+#
+#     cd assets/vendor/pdfjs && shasum -a 256 -c SHA256SUMS
+#
+version: 2
+
+# The scanner cannot finish on this skill, and that is a property of the skill, not a fault in the
+# scan. assets/vendor/pdfjs holds 1.7 MB of minified JavaScript, so static tokenization runs out of
+# budget and the run reports execution_successful: false. skillscan treats that as a hard fail
+# unless the skill accepts it here, in writing. Accepted, because the unparsed bytes are covered by
+# something stronger than a parse: they are the published pdfjs-dist 6.3.289 build, byte for byte,
+# their SHA-256 digests are in assets/vendor/pdfjs/SHA256SUMS, and `bin/review selftest` re-verifies
+# every digest on every run, so a single changed byte fails a test before the file reaches a
+# browser. The page also loads them under a CSP with no network origin, so they cannot call out.
+# Re-examine this if the vendored version changes, or if the bundle stops being a verbatim upstream
+# build. skillscan still prints the unfinished parse as a WARNING on every scan.
+accept_incomplete_execution: >-
+  assets/vendor/pdfjs is 1.7 MB of minified third-party JavaScript that static analysis cannot
+  finish tokenizing. Covered instead by pinned checksums (SHA256SUMS, re-verified by
+  `bin/review selftest`) and by a CSP with no network origin.
+
+rules:
+  - id: "YR4"
+    path: "assets/vendor/pdfjs/*.mjs"
+    reason: >-
+      Two occurrences, both inside the vendored copy of PDF.js. The rule matches a run of
+      "description:" and base64-looking text, which in a 458 KB and a 1.2 MB minified bundle is the
+      library's own property names and its embedded tables, not instructions aimed at a model.
+      These two files are byte for byte the published pdfjs-dist 6.3.289 build, their SHA-256 is in
+      SHA256SUMS beside them, and `bin/review selftest` re-verifies both on every run, so a changed
+      byte fails a test before it reaches a browser. Rejected the alternative of shipping the
+      unminified build, which is 3.6 MB and no more readable in one sitting, and of fetching the
+      library at run time, which would break the offline and no-network promise that is the whole
+      point of this tool.
+  - id: "AE1"
+    path: "SKILL.md"
+    reason: >-
+      One occurrence, naming assets/review.html as partly read. The two ledger reasons are
+      static_parse_limit and obfuscated_instruction_text, and both come from the same hook:
+      has_bounded_parse_exhaustion in static_patterns_tool_misuse, which tries to tokenize a
+      DESTRUCTIVE SHELL COMMAND and gives up when the span runs past its bound. There is no shell
+      in this file. It is browser JavaScript, and what the hook latches onto is ordinary DOM
+      vocabulary: removeAllRanges, removeAttribute, removeItem, .remove(). The page cannot run a
+      command at all: it is served to a browser, its two scripts are inline and stamped with a
+      per-response nonce, and the Content-Security-Policy the server sends is `default-src 'none'`
+      with `connect-src 'self'`. Rejected renaming nothing and splitting the file into modules to
+      please the parser: one file is what makes the page auditable by reading it, and a split
+      would add load-order surface without removing a line of code.
+  - id: "AST4"
+    path: "scripts/make_example_inputs.py"
+    reason: >-
+      Two occurrences, both in the script that rebuilds the example files behind the README
+      picture, and neither in the tool itself. One starts a Chrome binary to screenshot a local
+      HTML card, the other starts `bin/review` on the two files it just wrote. Both are list
+      argument vectors with no shell, and every element is a literal or a path this script created
+      in a directory it chose. Rejected hard-coding a browser path, which would only move the same
+      call somewhere less visible.
+  - id: "LP3"
+    path: "SKILL.md"
+    reason: >-
+      No allowed-tools declaration, on purpose. A skill that declares its own tool scope
+      pre-approves those tools inside your agent, which removes your permission decision instead of
+      informing it, so this repository forbids the field. LP3 fires only because the skill ships
+      executable scripts.
+  - id: "RA2"
+    path: "SKILL.md"
+    reason: >-
+      "This tool never writes to their files" reads as an unsupported absolute claim. It is a
+      statement about this code, and it is checkable: nothing in bin/review opens a reviewed file
+      for writing, every write goes to ~/.claude/.review/<id>/, and `edits_saved` is hard-coded
+      false in the batch for exactly that reason. The sentence stays, because an agent that
+      believes the reviewer's edit was already saved will not apply it.
+
+# NOT baselined, and it cannot be, so the absence is not read as an oversight:
+#
+# `completeness_status: failed` and `execution_successful: false`. The scanner runs out of its
+# analysis budget on the two vendored bundles (partial reason: runtime_limit) and exits 2. Our
+# wrapper treats that as blocking whatever any baseline says, so this skill FAILS our own policy
+# for as long as 1.7 MB of minified JavaScript sits in this folder. That is the price of drawing
+# PDF pages in the browser, it was paid knowingly, and it is reported rather than hidden: a large
+# third-party library here was NOT read by the scanner. It was read by its publisher's build,
+# pinned by hash, and the hash is re-checked by every `bin/review selftest` run. Decide for
+# yourself whether that is enough.

@@ -1,498 +1,2272 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>Review</title>
-<style>
-:root{--ink:#16202c;--mut:#5d6b7c;--line:#dbe2ea;--acc:#c8321e;--bg:#f2f5f8;--paper:#fff}
-*{box-sizing:border-box;margin:0;padding:0}
-body{font:15.5px/1.6 -apple-system,"Helvetica Neue",sans-serif;color:var(--ink);background:var(--bg);
-     display:flex;flex-direction:column;height:100vh;overflow:hidden}
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!-- Without this a phone renders a 980px desktop layout shrunk to fit, and no phone CSS below
+     ever applies. It was missing until 2026-10-02, so every @media rule was dead on a real phone. -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <title>Review</title>
+    <style>
+      :root {
+        --ink: #16202c;
+        --mut: #5d6b7c;
+        --line: #dbe2ea;
+        --acc: #c8321e;
+        --bg: #f2f5f8;
+        --paper: #fff;
+        --nav: 240px;
+        --side: 360px;
+      }
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+      body {
+        font:
+          15.5px/1.6 -apple-system,
+          "Helvetica Neue",
+          sans-serif;
+        color: var(--ink);
+        background: var(--bg);
+        display: flex;
+        flex-direction: column;
+        height: 100dvh;
+        overflow: hidden;
+      }
 
-header{display:flex;align-items:center;gap:10px;padding:10px 16px;background:var(--paper);
-       border-bottom:1px solid var(--line);flex:none}
-header h1{font-size:15px;font-weight:600;margin-right:auto}
-header .grp{display:flex;gap:6px;align-items:center}
-header .lbl{font-size:12px;color:var(--mut);margin-right:2px}
-.btn{border:1px solid var(--line);background:var(--paper);border-radius:8px;padding:6px 11px;
-     font:inherit;font-size:14px;cursor:pointer}
-.btn[aria-pressed="true"]{background:var(--ink);color:#fff;border-color:var(--ink)}
-.send{background:#1f6f3f;color:#fff;border:0;border-radius:8px;padding:9px 20px;font:inherit;
-      font-weight:600;cursor:pointer}
+      header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 16px;
+        background: var(--paper);
+        border-bottom: 1px solid var(--line);
+        flex: none;
+      }
+      header h1 {
+        font-size: 15px;
+        font-weight: 600;
+        margin-right: auto;
+      }
+      header .grp {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+      }
+      header .lbl {
+        font-size: 12px;
+        color: var(--mut);
+        margin-right: 2px;
+      }
+      .btn {
+        border: 1px solid var(--line);
+        background: var(--paper);
+        border-radius: 8px;
+        padding: 6px 11px;
+        font: inherit;
+        font-size: 14px;
+        cursor: pointer;
+        min-height: 32px;
+      }
+      .btn[aria-pressed="true"] {
+        background: var(--ink);
+        color: #fff;
+        border-color: var(--ink);
+      }
+      .btn .key {
+        font-size: 11px;
+        color: var(--mut);
+        margin-left: 5px;
+      }
+      .btn[aria-pressed="true"] .key {
+        color: #cfd8e2;
+      }
+      .send {
+        background: #1f6f3f;
+        color: #fff;
+        border: 0;
+        border-radius: 8px;
+        padding: 9px 20px;
+        font: inherit;
+        font-weight: 600;
+        cursor: pointer;
+        min-height: 44px;
+      }
+      :focus-visible {
+        outline: 2px solid #1d6fd0;
+        outline-offset: 2px;
+      }
 
-main{display:flex;flex:1;min-height:0}
-#stage{flex:1;overflow:auto;padding:26px 26px 120px;display:flex;flex-direction:column;
-       align-items:center;gap:34px}
-.item{width:100%;max-width:860px}
-.item > .cap{font-size:12.5px;color:var(--mut);margin-bottom:8px;display:flex;gap:8px;align-items:center}
-.kindtag{border:1px solid var(--line);border-radius:20px;padding:1px 9px;font-size:11px;
-         letter-spacing:.06em;text-transform:uppercase;color:var(--mut);background:var(--paper)}
+      main {
+        display: flex;
+        flex: 1;
+        min-height: 0;
+      }
+      #stage {
+        flex: 1;
+        overflow: auto;
+        padding: 26px 26px 120px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 34px;
+        scroll-behavior: smooth;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #stage {
+          scroll-behavior: auto;
+        }
+      }
+      .item {
+        width: 100%;
+        max-width: 860px;
+      }
+      .item > .cap,
+      .page > .cap {
+        font-size: 12.5px;
+        color: var(--mut);
+        margin-bottom: 8px;
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .kindtag {
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        padding: 1px 9px;
+        font-size: 11px;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--mut);
+        background: var(--paper);
+      }
+      .page {
+        margin-bottom: 26px;
+      }
+      .page:last-child {
+        margin-bottom: 0;
+      }
+      .warn {
+        color: #a2352a;
+      }
 
-/* media */
-.media{position:relative;background:var(--paper);border-radius:8px;line-height:0;
-       box-shadow:0 6px 26px rgba(20,30,50,.13)}
-.media img{display:block;width:100%;height:auto;border-radius:8px}
-.media canvas{position:absolute;inset:0;width:100%;height:100%;cursor:crosshair;border-radius:8px}
+      /* media */
+      .media {
+        position: relative;
+        background: var(--paper);
+        border-radius: 8px;
+        line-height: 0;
+        box-shadow: 0 6px 26px rgba(20, 30, 50, 0.13);
+      }
+      .media img,
+      .media canvas.sheet {
+        display: block;
+        width: 100%;
+        height: auto;
+        border-radius: 8px;
+      }
+      .media canvas.marks {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        border-radius: 8px;
+        pointer-events: none;
+      }
+      body.drawing .media canvas.marks {
+        pointer-events: auto;
+        cursor: crosshair;
+      }
+      body.drawing .textLayer {
+        pointer-events: none;
+        user-select: none;
+      }
 
-/* text */
-.doc{background:var(--paper);border-radius:8px;padding:34px 40px;box-shadow:0 6px 26px rgba(20,30,50,.10)}
-.doc h1{font-size:29px;margin:.2em 0 .5em;letter-spacing:-.02em}
-.doc h2{font-size:22px;margin:1.4em 0 .5em}
-.doc h3{font-size:18px;margin:1.3em 0 .45em}
-.doc p,.doc li{margin-bottom:.75em}
-.doc ul,.doc ol{padding-left:1.4em;margin-bottom:.8em}
-.doc blockquote{border-left:4px solid var(--line);padding-left:14px;color:var(--mut);margin:.8em 0}
-.doc pre{background:#f5f7fa;border-radius:8px;padding:12px 14px;overflow:auto;margin-bottom:.9em}
-.doc code{font:13.5px/1.5 ui-monospace,Menlo,monospace}
-.doc table{border-collapse:collapse;margin-bottom:1em;width:100%}
-.doc th,.doc td{border:1px solid var(--line);padding:6px 9px;text-align:left;font-size:14px}
-.doc img{max-width:100%;height:auto;border-radius:6px}
-[data-blk]{outline:0;border-radius:5px;transition:background .12s}
-[data-blk]:focus{background:#fffbe9;box-shadow:0 0 0 3px rgba(210,170,40,.18)}
-[data-blk].touched{background:#fff7dd}
+      /* The text layer of a PDF page. These rules are the part of pdf.js's own web/pdf_viewer.css that
+   TextLayer needs (Apache-2.0, mozilla/pdf.js 6.3.289), flattened out of its nested syntax. The
+   spans are transparent and sit exactly over the glyphs the canvas drew, which is what makes the
+   text of a PDF selectable, copyable and findable with the browser's own Ctrl+F. */
+      .textLayer {
+        position: absolute;
+        text-align: initial;
+        inset: 0;
+        overflow: clip;
+        line-height: 1;
+        opacity: 1;
+        letter-spacing: normal;
+        word-spacing: normal;
+        -webkit-text-size-adjust: none;
+        text-size-adjust: none;
+        forced-color-adjust: none;
+        transform-origin: 0 0;
+        caret-color: CanvasText;
+        z-index: 2;
+        --scale-round-x: 1px;
+        --scale-round-y: 1px;
+        --total-scale-factor: 1;
+        --min-font-size: 1;
+        --text-scale-factor: calc(
+          var(--total-scale-factor) * var(--min-font-size)
+        );
+        --min-font-size-inv: calc(1 / var(--min-font-size));
+      }
+      .textLayer span,
+      .textLayer br {
+        color: transparent;
+        position: absolute;
+        white-space: pre;
+        cursor: text;
+        transform-origin: 0% 0%;
+        -webkit-user-select: text;
+        user-select: text;
+      }
+      .textLayer > :not(.markedContent),
+      .textLayer .markedContent span:not(.markedContent) {
+        z-index: 1;
+        --font-height: 0;
+        font-size: calc(var(--text-scale-factor) * var(--font-height));
+        --scale-x: 1;
+        --rotate: 0deg;
+        transform: rotate(var(--rotate)) scaleX(var(--scale-x))
+          scale(var(--min-font-size-inv));
+      }
+      .textLayer .markedContent {
+        display: contents;
+      }
+      .textLayer ::selection {
+        background: rgba(29, 111, 208, 0.28);
+        color: transparent;
+      }
 
-/* sidebar */
-aside{width:390px;flex:none;background:var(--paper);border-left:1px solid var(--line);overflow:auto;
-      padding:16px 16px 96px}
-aside h2{font-size:11.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--mut);margin:8px 0 10px}
-.card{border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:10px}
-.card.active{border-color:var(--acc);box-shadow:0 0 0 3px rgba(200,50,30,.10)}
-.card .top{display:flex;align-items:center;gap:8px;margin-bottom:7px}
-.badge{width:23px;height:23px;border-radius:50%;background:var(--acc);color:#fff;font-size:12.5px;
-       font-weight:700;display:flex;align-items:center;justify-content:center;flex:none}
-.badge.edit{background:#8a6d1f}
-.card .where{font-size:12px;color:var(--mut);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.card .quote{font-size:13px;color:var(--mut);font-style:italic;margin-bottom:6px;
-             border-left:3px solid var(--line);padding-left:8px}
-.card textarea{width:100%;border:1px solid var(--line);border-radius:7px;padding:7px 8px;font:inherit;
-               font-size:14px;resize:vertical;min-height:52px}
-.card .del{border:0;background:none;color:var(--mut);cursor:pointer;font-size:16px;line-height:1}
-.diff{font:12.5px/1.45 ui-monospace,Menlo,monospace}
-.diff .b{color:#a2352a;text-decoration:line-through}
-.diff .a{color:#1f6f3f}
-#overall{width:100%;border:1px solid var(--line);border-radius:7px;padding:8px;font:inherit;
-         min-height:66px;resize:vertical}
-.empty{color:var(--mut);font-size:13px;padding:6px 2px 12px}
-footer{position:fixed;right:0;bottom:0;width:390px;background:var(--paper);border-top:1px solid var(--line);
-       border-left:1px solid var(--line);padding:12px 16px;display:flex;gap:10px;align-items:center}
-#status{font-size:13px;color:var(--mut)}
-.send:disabled{background:#9AA3AB;cursor:default}
-.done{display:flex;align-items:center;gap:10px;font-size:15px;font-weight:600;color:#1B7F4B}
-.done .tick{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;
-  border-radius:50%;background:#1B7F4B;color:#fff;font-size:15px}
-.done small{display:block;font-weight:400;color:var(--mut);font-size:13px;margin-top:2px}
-body.sent #stage,body.sent aside{opacity:.5;pointer-events:none;filter:grayscale(.25)}
-#selbtn{position:fixed;z-index:50;display:none;background:var(--ink);color:#fff;border:0;
-        border-radius:7px;padding:6px 11px;font:inherit;font-size:13px;cursor:pointer;
-        box-shadow:0 4px 14px rgba(0,0,0,.2)}
-</style></head><body>
+      /* text */
+      .doc {
+        background: var(--paper);
+        border-radius: 8px;
+        padding: 34px 40px;
+        box-shadow: 0 6px 26px rgba(20, 30, 50, 0.1);
+      }
+      .doc h1 {
+        font-size: 29px;
+        margin: 0.2em 0 0.5em;
+        letter-spacing: -0.02em;
+      }
+      .doc h2 {
+        font-size: 22px;
+        margin: 1.4em 0 0.5em;
+      }
+      .doc h3 {
+        font-size: 18px;
+        margin: 1.3em 0 0.45em;
+      }
+      .doc p,
+      .doc li {
+        margin-bottom: 0.75em;
+      }
+      .doc ul,
+      .doc ol {
+        padding-left: 1.4em;
+        margin-bottom: 0.8em;
+      }
+      .doc blockquote {
+        border-left: 4px solid var(--line);
+        padding-left: 14px;
+        color: var(--mut);
+        margin: 0.8em 0;
+      }
+      .doc pre {
+        background: #f5f7fa;
+        border-radius: 8px;
+        padding: 12px 14px;
+        overflow: auto;
+        margin-bottom: 0.9em;
+      }
+      .doc code {
+        font:
+          13.5px/1.5 ui-monospace,
+          Menlo,
+          monospace;
+      }
+      .doc table {
+        border-collapse: collapse;
+        margin-bottom: 1em;
+        width: 100%;
+      }
+      .doc th,
+      .doc td {
+        border: 1px solid var(--line);
+        padding: 6px 9px;
+        text-align: left;
+        font-size: 14px;
+      }
+      .doc img {
+        max-width: 100%;
+        height: auto;
+        border-radius: 6px;
+      }
+      [data-blk] {
+        outline: 0;
+        border-radius: 5px;
+        transition: background 0.12s;
+      }
+      [data-blk]:focus {
+        background: #fffbe9;
+        box-shadow: 0 0 0 3px rgba(210, 170, 40, 0.18);
+      }
+      [data-blk].touched {
+        background: #fff7dd;
+      }
 
-<header>
-  <h1>Review</h1>
-  <span class="grp"><span class="lbl">Image</span>
-    <button class="btn tool" data-tool="ellipse" aria-pressed="true">Circle</button>
-    <button class="btn tool" data-tool="rect" aria-pressed="false">Box</button>
-    <button class="btn tool" data-tool="free" aria-pressed="false">Freehand</button>
-    <button class="btn tool" data-tool="arrow" aria-pressed="false">Arrow</button>
-  </span>
-  <span class="grp"><span class="lbl">Text</span>
-    <span class="lbl">select to comment, type to edit</span>
-  </span>
-  <button class="btn" id="undo">Undo last mark</button>
-</header>
+      /* contents list */
+      #nav {
+        width: var(--nav);
+        flex: none;
+        background: var(--paper);
+        border-right: 1px solid var(--line);
+        overflow: auto;
+        padding: 14px 10px 24px;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+      #nav h2 {
+        font-size: 11.5px;
+        letter-spacing: 0.09em;
+        text-transform: uppercase;
+        color: var(--mut);
+        margin: 2px 6px 10px;
+        display: flex;
+        align-items: center;
+      }
+      #nav h2 .n {
+        margin-left: auto;
+        font-size: 11px;
+        letter-spacing: 0;
+        text-transform: none;
+      }
+      .nrow {
+        display: flex;
+        gap: 7px;
+        align-items: baseline;
+        width: 100%;
+        text-align: left;
+        border: 0;
+        background: none;
+        font: inherit;
+        font-size: 13px;
+        color: var(--mut);
+        padding: 5px 7px;
+        border-radius: 7px;
+        cursor: pointer;
+        min-height: 28px;
+      }
+      .nrow:hover {
+        background: #eef2f7;
+      }
+      .nrow .nm {
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .nrow .kindtag {
+        font-size: 9.5px;
+        padding: 0 6px;
+        flex: none;
+      }
+      .nrow .cnt {
+        flex: none;
+        background: var(--acc);
+        color: #fff;
+        border-radius: 10px;
+        font-size: 10.5px;
+        padding: 0 6px;
+        font-weight: 700;
+      }
+      .nrow.has {
+        color: var(--ink);
+      }
+      .nrow.file {
+        font-weight: 600;
+        color: var(--ink);
+        margin-top: 6px;
+      }
+      .nrow.h2 {
+        padding-left: 22px;
+      }
+      .nrow.h3 {
+        padding-left: 34px;
+      }
+      .nrow[aria-current="location"] {
+        background: #e7eefb;
+        color: var(--ink);
+        box-shadow: inset 3px 0 0 var(--acc);
+      }
+      .chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        padding: 3px 7px 5px 14px;
+      }
+      .chip {
+        border: 1px solid var(--line);
+        background: var(--paper);
+        border-radius: 6px;
+        min-width: 26px;
+        min-height: 26px;
+        font: inherit;
+        font-size: 11.5px;
+        color: var(--mut);
+        cursor: pointer;
+        padding: 0 4px;
+        position: relative;
+      }
+      .chip.has {
+        border-color: var(--acc);
+        color: var(--acc);
+        font-weight: 700;
+      }
+      .chip[aria-current="location"] {
+        background: var(--ink);
+        color: #fff;
+        border-color: var(--ink);
+      }
+      .navfoot {
+        margin-top: auto;
+        padding: 10px 7px 0;
+        font-size: 11px;
+        color: var(--mut);
+      }
 
-<main>
-  <div id="stage"></div>
-  <aside>
-    <h2>Feedback</h2>
-    <div id="feed"><p class="empty">Nothing yet. Circle a spot on an image, or select text and
-      click Comment. Typing in the text counts as an edit on its own.</p></div>
-    <h2>Overall note</h2>
-    <textarea id="overall" placeholder="Anything that does not belong to one spot"
-    oninput="saveDraft()"></textarea>
-  </aside>
-</main>
+      /* sidebar */
+      aside {
+        width: var(--side);
+        flex: none;
+        background: var(--paper);
+        border-left: 1px solid var(--line);
+        overflow: auto;
+        padding: 16px 16px 96px;
+      }
+      aside h2 {
+        font-size: 11.5px;
+        letter-spacing: 0.09em;
+        text-transform: uppercase;
+        color: var(--mut);
+        margin: 8px 0 10px;
+      }
+      .card {
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 10px;
+        margin-bottom: 10px;
+      }
+      .card.active {
+        border-color: var(--acc);
+        box-shadow: 0 0 0 3px rgba(200, 50, 30, 0.1);
+      }
+      .card.orphan {
+        border-style: dashed;
+      }
+      .card .top {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 7px;
+      }
+      .badge {
+        width: 23px;
+        height: 23px;
+        border-radius: 50%;
+        background: var(--acc);
+        color: #fff;
+        font-size: 12.5px;
+        font-weight: 700;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex: none;
+      }
+      .badge.edit {
+        background: #8a6d1f;
+      }
+      .card .where {
+        font-size: 12px;
+        color: var(--mut);
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .card .quote {
+        font-size: 13px;
+        color: var(--mut);
+        font-style: italic;
+        margin-bottom: 6px;
+        border-left: 3px solid var(--line);
+        padding-left: 8px;
+      }
+      .card textarea {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        padding: 7px 8px;
+        font: inherit;
+        font-size: 14px;
+        resize: vertical;
+        min-height: 52px;
+      }
+      .card .del {
+        border: 0;
+        background: none;
+        color: var(--mut);
+        cursor: pointer;
+        font-size: 16px;
+        line-height: 1;
+        min-width: 24px;
+        min-height: 24px;
+      }
+      .diff {
+        font:
+          12.5px/1.45 ui-monospace,
+          Menlo,
+          monospace;
+      }
+      .diff .b {
+        color: #a2352a;
+        text-decoration: line-through;
+      }
+      .diff .a {
+        color: #1f6f3f;
+      }
+      #overall {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        padding: 8px;
+        font: inherit;
+        min-height: 66px;
+        resize: vertical;
+      }
+      .empty {
+        color: var(--mut);
+        font-size: 13px;
+        padding: 6px 2px 12px;
+      }
+      footer {
+        position: fixed;
+        right: 0;
+        bottom: 0;
+        width: var(--side);
+        background: var(--paper);
+        border-top: 1px solid var(--line);
+        border-left: 1px solid var(--line);
+        padding: 12px 16px;
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        z-index: 30;
+      }
+      #status {
+        font-size: 13px;
+        color: var(--mut);
+      }
+      .send:disabled {
+        background: #9aa3ab;
+        cursor: default;
+      }
+      .done {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-size: 15px;
+        font-weight: 600;
+        color: #1b7f4b;
+      }
+      .done .tick {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 26px;
+        height: 26px;
+        border-radius: 50%;
+        background: #1b7f4b;
+        color: #fff;
+        font-size: 15px;
+      }
+      .done small {
+        display: block;
+        font-weight: 400;
+        color: var(--mut);
+        font-size: 13px;
+        margin-top: 2px;
+      }
+      body.sent #stage,
+      body.sent aside,
+      body.sent #nav {
+        opacity: 0.5;
+        pointer-events: none;
+        filter: grayscale(0.25);
+      }
+      #selbtn {
+        position: fixed;
+        z-index: 50;
+        display: none;
+        background: var(--ink);
+        color: #fff;
+        border: 0;
+        border-radius: 7px;
+        padding: 8px 13px;
+        font: inherit;
+        font-size: 13px;
+        cursor: pointer;
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2);
+        min-height: 36px;
+      }
+      #backdrop {
+        display: none;
+        position: fixed;
+        inset: 0;
+        background: rgba(16, 24, 36, 0.42);
+        z-index: 40;
+      }
+      body.drawer #backdrop {
+        display: block;
+      }
+      .drawerbtn {
+        display: none;
+      }
 
-<footer><button class="send" id="send">Send</button><span id="status"></span></footer>
-<button id="selbtn">Comment</button>
+      /* Below 1200px the contents list is a drawer, so the document keeps its width. */
+      @media (max-width: 1199px) {
+        #nav {
+          position: fixed;
+          z-index: 45;
+          top: 0;
+          bottom: 0;
+          left: 0;
+          width: min(84vw, 300px);
+          transform: translateX(-101%);
+          transition: transform 0.16s ease;
+          box-shadow: 6px 0 26px rgba(16, 24, 36, 0.18);
+          padding-top: 16px;
+        }
+        body.nav-open #nav {
+          transform: none;
+        }
+        #navbtn {
+          display: inline-flex;
+          align-items: center;
+        }
+      }
+      /* Phone: the 390px feedback column would leave the draft about 40px wide. Both lists become
+   drawers, the document gets the whole width, and a bottom bar carries Send. */
+      @media (max-width: 760px) {
+        header {
+          gap: 6px;
+          padding: 8px 10px;
+        }
+        header h1 {
+          font-size: 14px;
+          margin-right: 6px;
+        }
+        /* The tools scroll sideways on a narrow header. NOT justify-content:flex-end: a flex row
+           that overflows while aligned to the end puts the overflow on the start side, which no
+           browser lets you scroll back to, and the first two tools were unreachable. */
+        header .grp.tools {
+          overflow-x: auto;
+          gap: 5px;
+          flex: 1;
+          justify-content: flex-start;
+          scrollbar-width: none;
+          -webkit-overflow-scrolling: touch;
+        }
+        header .grp.tools::-webkit-scrollbar {
+          display: none;
+        }
+        header .hide-s,
+        .btn .key {
+          display: none; /* a keyboard hint on a phone is noise */
+        }
+        .btn {
+          white-space: nowrap;
+          padding: 6px 9px;
+          font-size: 13px;
+          min-height: 36px;
+        }
+        #stage {
+          padding: 14px 12px calc(84px + env(safe-area-inset-bottom));
+          gap: 22px;
+        }
+        .item {
+          max-width: none;
+        }
+        .doc {
+          padding: 18px 16px;
+        }
+        aside {
+          position: fixed;
+          z-index: 45;
+          top: 0;
+          bottom: 0;
+          right: 0;
+          width: min(88vw, 360px);
+          border-left: 0;
+          transform: translateX(101%);
+          transition: transform 0.16s ease;
+          box-shadow: -6px 0 26px rgba(16, 24, 36, 0.18);
+          padding: 16px 14px 28px;
+        }
+        body.side-open aside {
+          transform: none;
+        }
+        footer {
+          width: 100%;
+          border-left: 0;
+          padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+          justify-content: space-between;
+        }
+        .drawerbtn {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+        }
+        #status {
+          position: absolute;
+          bottom: 100%;
+          left: 12px;
+          background: var(--paper);
+          padding: 2px 6px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Review</h1>
+      <button
+        class="btn drawerbtn"
+        id="navbtn"
+        aria-expanded="false"
+        aria-controls="nav"
+        aria-keyshortcuts="o"
+        hidden
+      >
+        Contents<span class="key">o</span>
+      </button>
+      <span class="grp tools">
+        <span class="lbl hide-s">Mark</span>
+        <button class="btn tool" data-tool="select" aria-pressed="false" hidden>
+          Select text
+        </button>
+        <button class="btn tool" data-tool="ellipse" aria-pressed="true">
+          Circle
+        </button>
+        <button class="btn tool" data-tool="rect" aria-pressed="false">
+          Box
+        </button>
+        <button class="btn tool" data-tool="free" aria-pressed="false">
+          Freehand
+        </button>
+        <button class="btn tool" data-tool="arrow" aria-pressed="false">
+          Arrow
+        </button>
+        <button class="btn" id="undo">
+          Undo<span class="hide-s"> last mark</span>
+        </button>
+      </span>
+      <span class="grp hide-s"
+        ><span class="lbl" id="hint"
+          >select to comment, type to edit</span
+        ></span
+      >
+    </header>
 
-<script>
-const ITEMS = window.__ITEMS__, COLOR = "#c8321e";
-let tool = "ellipse", marks = [], comments = [], seq = 0, drawing = null, activeId = null;
-const originals = new Map();          // blockKey -> original text, for the edit diff
-// Whitespace is layout noise, not an edit: compare on a collapsed form.
-const norm = t => t.replace(/\s+/g, " ").trim();
+    <main>
+      <nav id="nav" aria-label="Contents" hidden>
+        <h2 id="navtitle">Contents</h2>
+        <div id="navlist"></div>
+        <div class="navfoot"><kbd>j</kbd> <kbd>k</kbd> next / previous</div>
+      </nav>
+      <div id="stage"></div>
+      <aside id="side" aria-label="Feedback">
+        <h2>Feedback</h2>
+        <div id="feed">
+          <p class="empty">
+            Nothing yet. Circle a spot on an image or a PDF page, or select text
+            and click Comment. Typing in a draft counts as an edit on its own.
+          </p>
+        </div>
+        <h2>Overall note</h2>
+        <textarea
+          id="overall"
+          placeholder="Anything that does not belong to one spot"
+        ></textarea>
+      </aside>
+    </main>
 
-/* ---------------- stage ---------------- */
-const stage = document.getElementById("stage");
-ITEMS.forEach(item => {
-  const wrap = document.createElement("div");
-  wrap.className = "item";
-  wrap.innerHTML = `<div class="cap"><span class="kindtag">${item.kind === "media" ? "Image" : "Text"}</span>
-                    <span>${item.name}</span></div>`;
-  if (item.kind === "media") {
-    const box = document.createElement("div");
-    box.className = "media"; box.dataset.item = item.id;
-    const img = new Image(); img.src = item.url; img.alt = item.name;
-    const cv = document.createElement("canvas");
-    box.append(img, cv); wrap.append(box);
-    img.onload = () => { cv.width = img.naturalWidth; cv.height = img.naturalHeight; redraw(); };
-    bindDrawing(cv, item.id);
-  } else {
-    const doc = document.createElement("div");
-    doc.className = "doc"; doc.dataset.item = item.id;
-    doc.innerHTML = item.html;
-    // Every top-level block becomes editable and gets a stable key, so a change can be reported
-    // as before/after on that block instead of as a diff of the whole document.
-    [...doc.children].forEach((el, i) => {
-      const key = `${item.id}#${i}`;
-      el.setAttribute("data-blk", key);
-      el.setAttribute("contenteditable", "true");
-      el.setAttribute("spellcheck", "false");
-      el.addEventListener("input", () => {
-        el.classList.toggle("touched", norm(el.innerText) !== originals.get(key));
-        renderFeed(); saveDraft();
+    <div id="backdrop"></div>
+    <footer>
+      <button
+        class="btn drawerbtn"
+        id="sidebtn"
+        aria-expanded="false"
+        aria-controls="side"
+      >
+        Feedback <span class="cnt" id="sidecnt">0</span>
+      </button>
+      <button class="send" id="send">Send</button><span id="status"></span>
+    </footer>
+    <button id="selbtn">Comment</button>
+
+    <script nonce="__NONCE__">
+      /*__BOOT__*/
+    </script>
+    <script type="module" nonce="__NONCE__">
+      import * as pdfjs from "/vendor/pdf.min.mjs";
+      // Everything the page loads comes from this server. The worker is a file in assets/vendor/pdfjs,
+      // pinned and checksummed; see the README beside it. No CDN, no network, and the server's
+      // Content-Security-Policy refuses anything else even if this line were wrong.
+      pdfjs.GlobalWorkerOptions.workerSrc = "/vendor/pdf.worker.min.mjs";
+
+      const ITEMS = window.__ITEMS__,
+        COLOR = "#c8321e";
+      const HAS_PDF = ITEMS.some((i) => i.format === "pdf");
+      // A session with a PDF opens in the tool a PDF viewer opens in. A session of pictures opens in
+      // Circle, which is the habit and the only useful tool there.
+      let tool = HAS_PDF ? "select" : "ellipse";
+      let marks = [],
+        comments = [],
+        seq = 0,
+        drawing = null,
+        activeId = null;
+      const originals = new Map(); // blockKey -> original text, for the edit diff
+      const norm = (t) => t.replace(/\s+/g, " ").trim(); // whitespace is layout noise, not an edit
+      const RM = matchMedia("(prefers-reduced-motion: reduce)");
+
+      // A SURFACE is one thing a mark can sit on: an image, or one page of a PDF. Its key is the mark's
+      // `item` field. For an image the key IS the document id, so a draft written before PDF pages
+      // existed still restores onto it.
+      const SURFACES = new Map();
+      const surfaceKey = (item, page) =>
+        page ? `${item.id}#p${page}` : item.id;
+      const stage = document.getElementById("stage");
+      const $ = (sel) => document.querySelector(sel);
+
+      /* ---------------- stage ---------------- */
+      function caption(kind, label, extra) {
+        return `<div class="cap"><span class="kindtag">${kind}</span><span>${label}</span>${extra || ""}</div>`;
+      }
+
+      function buildMedia(host, item, page, pages, label) {
+        const wrap = document.createElement("div");
+        wrap.className = page ? "page" : "";
+        wrap.innerHTML = caption(page ? "PDF" : "Image", label);
+        const box = document.createElement("div");
+        box.className = "media";
+        const key = surfaceKey(item, page);
+        box.dataset.surface = key;
+        const cv = document.createElement("canvas");
+        cv.className = "marks";
+        box.append(cv);
+        wrap.append(box);
+        host.append(wrap);
+        const surface = {
+          key,
+          item: item.id,
+          page,
+          pages,
+          label,
+          box,
+          marksCanvas: cv,
+          wrap,
+        };
+        SURFACES.set(key, surface);
+        bindDrawing(cv, key);
+        return surface;
+      }
+
+      function buildText(host, item) {
+        const doc = document.createElement("div");
+        doc.className = "doc";
+        doc.dataset.item = item.id;
+        doc.innerHTML = item.html;
+        // Every top-level block becomes editable and gets a stable key, so a change can be reported
+        // as before/after on that block instead of as a diff of the whole document.
+        [...doc.children].forEach((el, i) => {
+          const key = `${item.id}#${i}`;
+          el.setAttribute("data-blk", key);
+          el.setAttribute("contenteditable", "true");
+          el.setAttribute("spellcheck", "false");
+          el.addEventListener("input", () => {
+            el.classList.toggle(
+              "touched",
+              norm(el.innerText) !== originals.get(key),
+            );
+            renderFeed();
+            saveDraft();
+          });
+        });
+        // Snapshot AFTER layout. innerText depends on rendering: read before the browser has laid the
+        // block out and a table comes back as "PunktStand…" without its tabs, so every table and list
+        // then reports itself as edited on send. Measured 2026-09-09: 16 phantom edits in one document.
+        requestAnimationFrame(() => {
+          [...doc.children].forEach((el) =>
+            originals.set(el.getAttribute("data-blk"), norm(el.innerText)),
+          );
+        });
+        host.append(doc);
+      }
+
+      const pdfDocs = new Map(); // item id -> PDFDocumentProxy
+      const pdfPages = new Map(); // surface key -> PDFPageProxy
+      const textLayers = new Map(); // surface key -> TextLayer
+
+      ITEMS.forEach((item) => {
+        const wrap = document.createElement("div");
+        wrap.className = "item";
+        wrap.dataset.item = item.id;
+        stage.append(wrap);
+        if (item.kind === "text") {
+          wrap.innerHTML = caption("Text", item.name);
+          buildText(wrap, item);
+          return;
+        }
+        if (item.format === "pdf") {
+          wrap.innerHTML = caption(
+            "PDF",
+            item.name,
+            `<span class="cnt-wait">reading…</span>`,
+          );
+          openPdf(wrap, item).catch((err) => {
+            wrap.querySelector(".cnt-wait").outerHTML =
+              `<span class="warn">could not be read (${String(err.message || err).slice(0, 80)})</span>`;
+          });
+          return;
+        }
+        const surface = buildMedia(wrap, item, null, null, item.name);
+        wrap.querySelector(".cap").remove(); // the image carries its own caption above
+        wrap.insertAdjacentHTML("afterbegin", caption("Image", item.name));
+        const img = new Image();
+        img.src = item.url;
+        img.alt = item.name;
+        surface.box.prepend(img);
+        surface.img = img;
+        img.onload = () => {
+          surface.w = img.naturalWidth;
+          surface.h = img.naturalHeight;
+          sizeMarks(surface);
+        };
       });
-    });
-    // Snapshot AFTER layout. innerText depends on rendering: read before the browser has laid the
-    // block out and a table comes back as "PunktStand…" without its tabs, so every table and list
-    // then reports itself as edited on send. Measured 2026-09-09: 16 phantom edits in one document.
-    requestAnimationFrame(() => {
-      [...doc.children].forEach(el => originals.set(el.getAttribute("data-blk"), norm(el.innerText)));
-    });
-    wrap.append(doc);
-  }
-  stage.append(wrap);
-});
 
-/* ---------------- text selection -> comment ---------------- */
-const selBtn = document.getElementById("selbtn");
-let pendingSel = null;
+      /* ---------------- PDF pages, drawn by pdf.js ---------------- */
+      async function openPdf(wrap, item) {
+        // isEvalSupported:false is the documented mitigation for CVE-2024-4367, and scripting and XFA
+        // stay off: a reviewed PDF is a document, never a program.
+        const doc = await pdfjs.getDocument({
+          url: item.url,
+          isEvalSupported: false,
+          enableXfa: false,
+          isOffscreenCanvasSupported: true,
+        }).promise;
+        pdfDocs.set(item.id, doc);
+        const label = item.page_label === "slide" ? "slide" : "page";
+        wrap.querySelector(".cnt-wait").textContent =
+          `${doc.numPages} ${label}${doc.numPages === 1 ? "" : "s"}`;
+        const pages = doc.numPages;
+        for (let n = 1; n <= pages; n++) {
+          const page = await doc.getPage(n);
+          const vp = page.getViewport({ scale: 1 });
+          const surface = buildMedia(
+            wrap,
+            item,
+            n,
+            pages,
+            `${item.name}, ${label} ${n}`,
+          );
+          surface.pt = { w: vp.width, h: vp.height };
+          surface.pdfPage = page;
+          pdfPages.set(surface.key, page);
+          const sheet = document.createElement("canvas");
+          sheet.className = "sheet";
+          sheet.style.aspectRatio = `${vp.width} / ${vp.height}`;
+          const layer = document.createElement("div");
+          layer.className = "textLayer";
+          surface.box.prepend(sheet);
+          surface.box.append(layer); // over the page canvas, under the marks
+          surface.sheet = sheet;
+          surface.layer = layer;
+          // The aspect ratio gives the page its height before anything is drawn, so a mark drawn
+          // on a page that is still outside the viewport lands on a canvas of the right size.
+          sizeMarks(surface);
+          paintObserver.observe(surface.box);
+        }
+        buildNav();
+        // The list was built while the pages had no height yet, so "where am I" has to be asked
+        // again now that they do. Without this the first entry stays highlighted until a scroll.
+        trackPosition();
+        // Ctrl+F has to find text on a page nobody has scrolled to yet, so every text layer is built
+        // up front, in the background, one page at a time. Beyond this many pages that costs more than
+        // it gives, and find then covers the pages that have been on screen.
+        const EAGER = 200;
+        for (let n = 1; n <= Math.min(pages, EAGER); n++)
+          await buildTextLayer(surfaceKey(item, n));
+        renderFeed();
+      }
 
-document.addEventListener("selectionchange", () => {
-  const s = document.getSelection();
-  if (!s || s.isCollapsed || !s.rangeCount) { selBtn.style.display = "none"; pendingSel = null; return; }
-  const range = s.getRangeAt(0);
-  const blk = range.startContainer.parentElement?.closest("[data-blk]");
-  if (!blk || !s.toString().trim()) { selBtn.style.display = "none"; pendingSel = null; return; }
-  const text = blk.innerText, quote = s.toString();
-  const at = text.indexOf(quote);
-  // Prefix/quote/suffix anchoring, the idea ported from upstream human-review (MIT, Peter Yang):
-  // the quote alone is ambiguous when a phrase repeats, the neighbours disambiguate it.
-  pendingSel = { block: blk.getAttribute("data-blk"), item: blk.closest("[data-item]").dataset.item,
-                 quote,
-                 anchor: { prefix: at > 0 ? text.slice(Math.max(0, at - 40), at) : "",
-                           quote, suffix: at >= 0 ? text.slice(at + quote.length, at + quote.length + 40) : "" } };
-  // The scrolling container is #stage, not the window, so viewport coordinates plus position:fixed
-  // are the only pair that puts this button where the selection actually is.
-  const r = range.getBoundingClientRect();
-  selBtn.style.display = "block";
-  selBtn.style.left = `${Math.round(Math.max(8, r.left))}px`;
-  selBtn.style.top = `${Math.round(Math.min(window.innerHeight - 44, r.bottom + 6))}px`;
-});
+      function cssScale(surface) {
+        const w = surface.box.clientWidth || 860;
+        return w / surface.pt.w;
+      }
 
-selBtn.onclick = () => {
-  if (!pendingSel) return;
-  comments.push({ id: ++seq, ...pendingSel, note: "" });
-  activeId = seq; selBtn.style.display = "none";
-  renderFeed(); saveDraft();
-  const ta = document.querySelector(`#fb-${activeId} textarea`); if (ta) ta.focus();
-};
+      async function buildTextLayer(key) {
+        const surface = SURFACES.get(key);
+        if (!surface || !surface.layer || textLayers.has(key)) return;
+        const page = pdfPages.get(key),
+          scale = cssScale(surface);
+        const layer = new pdfjs.TextLayer({
+          textContentSource: page.streamTextContent(),
+          container: surface.layer,
+          viewport: page.getViewport({ scale }),
+        });
+        surface.layer.style.setProperty("--total-scale-factor", scale);
+        textLayers.set(key, layer);
+        await layer.render();
+        if (!surface.layer.textContent.trim()) {
+          surface.wrap
+            .querySelector(".cap")
+            .insertAdjacentHTML(
+              "beforeend",
+              `<span class="warn">no text in this page, so nothing to select</span>`,
+            );
+        }
+      }
 
-/* ---------------- media drawing ---------------- */
-document.querySelectorAll(".tool").forEach(b => b.onclick = () => {
-  tool = b.dataset.tool;
-  document.querySelectorAll(".tool").forEach(x => x.setAttribute("aria-pressed", x === b));
-});
-document.getElementById("undo").onclick = () => { marks.pop(); renderFeed(); redraw(); saveDraft(); };
+      async function paintPage(key) {
+        const surface = SURFACES.get(key);
+        if (!surface || !surface.sheet) return;
+        const scale = cssScale(surface),
+          dpr = window.devicePixelRatio || 1;
+        if (surface.painted === scale * dpr) return;
+        surface.painted = scale * dpr;
+        surface.task?.cancel();
+        // The canvas is as many device pixels as the screen has, so a page is as sharp as the screen
+        // allows at this width, and it is repainted when the width or the pixel ratio changes.
+        const vp = surface.pdfPage.getViewport({ scale: scale * dpr });
+        surface.sheet.width = Math.max(1, Math.floor(vp.width));
+        surface.sheet.height = Math.max(1, Math.floor(vp.height));
+        surface.task = surface.pdfPage.render({
+          canvasContext: surface.sheet.getContext("2d"),
+          viewport: vp,
+        });
+        try {
+          await surface.task.promise;
+        } catch (e) {
+          surface.painted = 0;
+        }
+        sizeMarks(surface);
+      }
 
-function relPos(ev, cv) {
-  const r = cv.getBoundingClientRect();
-  return { x: (ev.clientX - r.left) / r.width, y: (ev.clientY - r.top) / r.height };
-}
-function bindDrawing(cv, itemId) {
-  cv.addEventListener("pointerdown", ev => {
-    cv.setPointerCapture(ev.pointerId);
-    const p = relPos(ev, cv);
-    drawing = { id: ++seq, item: itemId, tool, note: "", x0: p.x, y0: p.y, x1: p.x, y1: p.y, path: [p] };
-  });
-  cv.addEventListener("pointermove", ev => {
-    if (!drawing || drawing.item !== itemId) return;
-    const p = relPos(ev, cv);
-    drawing.x1 = p.x; drawing.y1 = p.y;
-    if (drawing.tool === "free") drawing.path.push(p);
-    redraw();
-  });
-  cv.addEventListener("pointerup", () => {
-    if (!drawing) return;
-    const big = Math.abs(drawing.x1 - drawing.x0) > .012 || Math.abs(drawing.y1 - drawing.y0) > .012
-             || drawing.path.length > 4;
-    if (big) { marks.push(drawing); activeId = drawing.id; }
-    drawing = null; renderFeed(); redraw(); saveDraft();
-    const ta = document.querySelector(`#fb-${activeId} textarea`); if (ta) ta.focus();
-  });
-}
+      function freePage(key) {
+        const surface = SURFACES.get(key);
+        if (!surface || !surface.sheet) return;
+        surface.task?.cancel();
+        surface.painted = 0;
+        surface.sheet.width = surface.sheet.height = 0; // a session can hold 80 pages; keep the memory bounded
+      }
 
-function strokeMark(ctx, m, w, h, number) {
-  const x0 = m.x0*w, y0 = m.y0*h, x1 = m.x1*w, y1 = m.y1*h;
-  ctx.save();
-  ctx.strokeStyle = COLOR; ctx.lineWidth = Math.max(3, w*0.004);
-  ctx.lineJoin = "round"; ctx.lineCap = "round";
-  if (m.tool === "ellipse") {
-    ctx.beginPath();
-    ctx.ellipse((x0+x1)/2, (y0+y1)/2, Math.abs(x1-x0)/2, Math.abs(y1-y0)/2, 0, 0, Math.PI*2); ctx.stroke();
-  } else if (m.tool === "rect") {
-    ctx.strokeRect(Math.min(x0,x1), Math.min(y0,y1), Math.abs(x1-x0), Math.abs(y1-y0));
-  } else if (m.tool === "free") {
-    ctx.beginPath(); m.path.forEach((p,i) => i ? ctx.lineTo(p.x*w,p.y*h) : ctx.moveTo(p.x*w,p.y*h)); ctx.stroke();
-  } else {
-    const a = Math.atan2(y1-y0, x1-x0), head = Math.max(14, w*0.018);
-    ctx.beginPath(); ctx.moveTo(x0,y0); ctx.lineTo(x1,y1); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(x1,y1);
-    ctx.lineTo(x1-head*Math.cos(a-0.4), y1-head*Math.sin(a-0.4)); ctx.moveTo(x1,y1);
-    ctx.lineTo(x1-head*Math.cos(a+0.4), y1-head*Math.sin(a+0.4)); ctx.stroke();
-  }
-  if (number) {
-    const bx = Math.min(x0,x1), by = Math.min(y0,y1), r = Math.max(13, w*0.016);
-    ctx.beginPath(); ctx.arc(bx, by, r, 0, Math.PI*2); ctx.fillStyle = COLOR; ctx.fill();
-    ctx.fillStyle = "#fff"; ctx.font = `700 ${Math.round(r*1.25)}px -apple-system,sans-serif`;
-    ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText(String(number), bx, by+1);
-  }
-  ctx.restore();
-}
+      const paintObserver = new IntersectionObserver(
+        (entries) => {
+          entries.forEach((e) => {
+            const key = e.target.dataset.surface;
+            if (e.isIntersecting) paintPage(key);
+            else freePage(key);
+          });
+        },
+        { root: stage, rootMargin: "150% 0px" },
+      );
 
-function redraw() {
-  ITEMS.filter(i => i.kind === "media").forEach(i => {
-    const cv = document.querySelector(`.media[data-item="${i.id}"] canvas`);
-    if (!cv) return;
-    const ctx = cv.getContext("2d");
-    ctx.clearRect(0, 0, cv.width, cv.height);
-    marks.filter(m => m.item === i.id).forEach(m => strokeMark(ctx, m, cv.width, cv.height, numberOf(m)));
-    if (drawing && drawing.item === i.id) strokeMark(ctx, drawing, cv.width, cv.height, 0);
-  });
-}
+      // A mark canvas carries device pixels too, or a stroke over a sharp page looks like a sticker.
+      function sizeMarks(surface) {
+        const cv = surface.marksCanvas,
+          dpr = window.devicePixelRatio || 1;
+        const w = Math.max(1, Math.round(surface.box.clientWidth * dpr));
+        const h = Math.max(
+          1,
+          Math.round((surface.box.clientHeight || 1) * dpr),
+        );
+        if (cv.width !== w || cv.height !== h) {
+          cv.width = w;
+          cv.height = h;
+        }
+        redraw();
+      }
 
-/* ---------------- feedback list ---------------- */
-function edits() {
-  const out = [];
-  document.querySelectorAll("[data-blk]").forEach(el => {
-    const key = el.getAttribute("data-blk");
-    const before = originals.get(key), after = norm(el.innerText);
-    if (before !== undefined && before !== after)
-      out.push({ key, item: el.closest("[data-item]").dataset.item, before, after,
-                 label: el.tagName.toLowerCase() });
-  });
-  return out;
-}
-const ordered = () => [...marks, ...comments].sort((a,b) => a.id - b.id);
-const numberOf = m => ordered().findIndex(x => x.id === m.id) + 1;
+      let relayout = null;
+      function onResize() {
+        clearTimeout(relayout);
+        relayout = setTimeout(() => {
+          SURFACES.forEach((surface) => {
+            if (!surface.sheet) {
+              sizeMarks(surface);
+              return;
+            }
+            const scale = cssScale(surface);
+            const layer = textLayers.get(surface.key);
+            if (layer) {
+              surface.layer.style.setProperty("--total-scale-factor", scale);
+              layer.update({
+                viewport: surface.pdfPage.getViewport({ scale }),
+              });
+            }
+            if (surface.painted) {
+              surface.painted = 0;
+              paintPage(surface.key);
+            }
+            sizeMarks(surface);
+          });
+        }, 180);
+      }
+      window.addEventListener("resize", onResize);
+      // A browser zoom changes devicePixelRatio, and a page has to be repainted to stay sharp.
+      (function watchDpr() {
+        matchMedia(
+          `(resolution: ${window.devicePixelRatio}dppx)`,
+        ).addEventListener(
+          "change",
+          () => {
+            onResize();
+            watchDpr();
+          },
+          { once: true },
+        );
+      })();
 
-// A note box that scrolls hides the sentence somebody just wrote, and they cannot see whether the
-// end of it survived. Grow to fit instead.
-function fit(ta) {
-  ta.style.height = "auto";
-  ta.style.height = `${Math.min(ta.scrollHeight + 2, 420)}px`;
-}
+      /* ---------------- selection -> comment ---------------- */
+      const selBtn = document.getElementById("selbtn");
+      let pendingSel = null;
 
-function setActive(id) {
-  activeId = id;
-  document.querySelectorAll("#feed .card").forEach(c =>
-    c.classList.toggle("active", c.id === `fb-${id}`));
-  redraw();                       // the canvas draws the active mark differently
-}
+      // One anchor function for a Markdown block and for a PDF page alike. It counts the characters
+      // BEFORE the selection inside its container, so a phrase that appears three times anchors to the
+      // one that was selected. `indexOf(quote)` used to anchor every occurrence to the first.
+      function anchorFor(container, range) {
+        const before = document.createRange();
+        before.selectNodeContents(container);
+        before.setEnd(range.startContainer, range.startOffset);
+        const at = before.toString().length,
+          text = container.textContent,
+          quote = range.toString();
+        return {
+          at,
+          quote,
+          anchor: {
+            prefix: text.slice(Math.max(0, at - 40), at),
+            quote,
+            suffix: text.slice(at + quote.length, at + quote.length + 40),
+          },
+        };
+      }
 
-function renderFeed() {
-  const host = document.getElementById("feed");
-  const list = ordered(), eds = edits();
-  if (!list.length && !eds.length) {
-    host.innerHTML = `<p class="empty">Nothing yet. Circle a spot on an image, or select text and click
-      Comment. Typing in the text counts as an edit on its own.</p>`;
-    redraw(); return;
-  }
-  host.innerHTML = "";
-  list.forEach((m, idx) => {
-    const item = ITEMS.find(i => i.id === (m.item));
-    const el = document.createElement("div");
-    el.className = "card" + (m.id === activeId ? " active" : ""); el.id = `fb-${m.id}`;
-    const where = m.tool ? `${item.name} · ${m.tool}` : `${item.name} · text`;
-    el.innerHTML = `<div class="top"><span class="badge">${idx+1}</span>
+      document.addEventListener("selectionchange", () => {
+        const s = document.getSelection();
+        pendingSel = null;
+        if (!s || s.isCollapsed || !s.rangeCount) {
+          selBtn.style.display = "none";
+          return;
+        }
+        const range = s.getRangeAt(0);
+        const node =
+          range.startContainer.nodeType === 1
+            ? range.startContainer
+            : range.startContainer.parentElement;
+        const blk = node?.closest("[data-blk]"),
+          layer = node?.closest(".textLayer");
+        if (!s.toString().trim() || (!blk && !layer)) {
+          selBtn.style.display = "none";
+          return;
+        }
+        if (blk) {
+          const a = anchorFor(blk, range);
+          pendingSel = {
+            kind: "text",
+            block: blk.getAttribute("data-blk"),
+            item: blk.closest("[data-item]").dataset.item,
+            quote: a.quote,
+            anchor: a.anchor,
+          };
+        } else {
+          const box = layer.closest(".media"),
+            a = anchorFor(layer, range);
+          pendingSel = {
+            kind: "pdf",
+            item: box.dataset.surface,
+            tool: "text",
+            quote: a.quote,
+            anchor: a.anchor,
+            rects: rectsIn(box, range),
+          };
+        }
+        // The scrolling container is #stage, not the window, so viewport coordinates plus position:fixed
+        // are the only pair that puts this button where the selection actually is.
+        const r = range.getBoundingClientRect();
+        selBtn.style.display = "block";
+        selBtn.style.left = `${Math.round(Math.max(8, Math.min(window.innerWidth - 110, r.left)))}px`;
+        selBtn.style.top = `${Math.round(Math.min(window.innerHeight - 48, r.bottom + 6))}px`;
+      });
+
+      // The highlight of a selection, as fractions of the page, one rectangle per line. Client
+      // rectangles come per span, so rectangles that share a line are merged first.
+      function rectsIn(box, range) {
+        const b = box.getBoundingClientRect(),
+          lines = [];
+        [...range.getClientRects()]
+          .filter((r) => r.width > 0.5 && r.height > 0.5)
+          .forEach((r) => {
+            const hit = lines.find(
+              (l) => Math.abs(l.top - r.top) < r.height * 0.6,
+            );
+            if (hit) {
+              hit.left = Math.min(hit.left, r.left);
+              hit.right = Math.max(hit.right, r.right);
+              hit.bottom = Math.max(hit.bottom, r.bottom);
+              hit.top = Math.min(hit.top, r.top);
+            } else
+              lines.push({
+                top: r.top,
+                bottom: r.bottom,
+                left: r.left,
+                right: r.right,
+              });
+          });
+        return lines.map((l) => ({
+          x: +((l.left - b.left) / b.width).toFixed(4),
+          y: +((l.top - b.top) / b.height).toFixed(4),
+          w: +((l.right - l.left) / b.width).toFixed(4),
+          h: +((l.bottom - l.top) / b.height).toFixed(4),
+        }));
+      }
+
+      selBtn.onclick = () => {
+        if (!pendingSel) return;
+        const { kind, ...rest } = pendingSel;
+        if (kind === "pdf") {
+          const r = rest.rects,
+            x0 = Math.min(...r.map((v) => v.x)),
+            y0 = Math.min(...r.map((v) => v.y));
+          marks.push({
+            id: ++seq,
+            note: "",
+            ...rest,
+            x0,
+            y0,
+            x1: Math.max(...r.map((v) => v.x + v.w)),
+            y1: Math.max(...r.map((v) => v.y + v.h)),
+          });
+        } else {
+          comments.push({ id: ++seq, note: "", ...rest });
+        }
+        activeId = seq;
+        selBtn.style.display = "none";
+        document.getSelection()?.removeAllRanges();
+        renderFeed();
+        redraw();
+        saveDraft();
+        openSide();
+        const ta = $(`#fb-${activeId} textarea`);
+        if (ta) ta.focus();
+      };
+
+      /* ---------------- media drawing ---------------- */
+      function setTool(name) {
+        tool = name;
+        document
+          .querySelectorAll(".tool")
+          .forEach((x) =>
+            x.setAttribute("aria-pressed", x.dataset.tool === name),
+          );
+        document.body.classList.toggle("drawing", name !== "select");
+        $("#hint").textContent =
+          name === "select"
+            ? "select text in a PDF or a draft to comment, type in a draft to edit"
+            : "drag on a picture or a PDF page to mark it";
+      }
+      document
+        .querySelectorAll(".tool")
+        .forEach((b) => (b.onclick = () => setTool(b.dataset.tool)));
+      if (HAS_PDF)
+        document.querySelector('.tool[data-tool="select"]').hidden = false;
+      setTool(tool);
+      document.getElementById("undo").onclick = () => {
+        marks.pop();
+        renderFeed();
+        redraw();
+        saveDraft();
+      };
+
+      function relPos(ev, cv) {
+        const r = cv.getBoundingClientRect();
+        return {
+          x: (ev.clientX - r.left) / r.width,
+          y: (ev.clientY - r.top) / r.height,
+        };
+      }
+      function bindDrawing(cv, key) {
+        cv.addEventListener("pointerdown", (ev) => {
+          if (tool === "select") return;
+          cv.setPointerCapture(ev.pointerId);
+          const p = relPos(ev, cv);
+          drawing = {
+            id: ++seq,
+            item: key,
+            tool,
+            note: "",
+            x0: p.x,
+            y0: p.y,
+            x1: p.x,
+            y1: p.y,
+            path: [p],
+          };
+        });
+        cv.addEventListener("pointermove", (ev) => {
+          if (!drawing || drawing.item !== key) return;
+          const p = relPos(ev, cv);
+          drawing.x1 = p.x;
+          drawing.y1 = p.y;
+          if (drawing.tool === "free") drawing.path.push(p);
+          redraw();
+        });
+        cv.addEventListener("pointerup", () => {
+          if (!drawing) return;
+          const big =
+            Math.abs(drawing.x1 - drawing.x0) > 0.012 ||
+            Math.abs(drawing.y1 - drawing.y0) > 0.012 ||
+            drawing.path.length > 4;
+          if (big) {
+            marks.push(drawing);
+            activeId = drawing.id;
+          }
+          drawing = null;
+          renderFeed();
+          redraw();
+          saveDraft();
+          if (big) openSide();
+          const ta = $(`#fb-${activeId} textarea`);
+          if (ta) ta.focus();
+        });
+      }
+
+      function strokeMark(ctx, m, w, h, number) {
+        const x0 = m.x0 * w,
+          y0 = m.y0 * h,
+          x1 = m.x1 * w,
+          y1 = m.y1 * h;
+        ctx.save();
+        ctx.strokeStyle = COLOR;
+        ctx.lineWidth = Math.max(3, w * 0.004);
+        ctx.lineJoin = "round";
+        ctx.lineCap = "round";
+        if (m.tool === "text") {
+          // A selection is shown as the reviewer saw it: the words highlighted, not a ring around them.
+          ctx.fillStyle = "rgba(200,50,30,.22)";
+          ctx.strokeStyle = "rgba(200,50,30,.55)";
+          ctx.lineWidth = Math.max(1, w * 0.0012);
+          (m.rects || []).forEach((r) => {
+            ctx.fillRect(r.x * w, r.y * h, r.w * w, r.h * h);
+            ctx.strokeRect(r.x * w, r.y * h, r.w * w, r.h * h);
+          });
+        } else if (m.tool === "ellipse") {
+          ctx.beginPath();
+          ctx.ellipse(
+            (x0 + x1) / 2,
+            (y0 + y1) / 2,
+            Math.abs(x1 - x0) / 2,
+            Math.abs(y1 - y0) / 2,
+            0,
+            0,
+            Math.PI * 2,
+          );
+          ctx.stroke();
+        } else if (m.tool === "rect") {
+          ctx.strokeRect(
+            Math.min(x0, x1),
+            Math.min(y0, y1),
+            Math.abs(x1 - x0),
+            Math.abs(y1 - y0),
+          );
+        } else if (m.tool === "free") {
+          ctx.beginPath();
+          m.path.forEach((p, i) =>
+            i ? ctx.lineTo(p.x * w, p.y * h) : ctx.moveTo(p.x * w, p.y * h),
+          );
+          ctx.stroke();
+        } else {
+          const a = Math.atan2(y1 - y0, x1 - x0),
+            head = Math.max(14, w * 0.018);
+          ctx.beginPath();
+          ctx.moveTo(x0, y0);
+          ctx.lineTo(x1, y1);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(x1, y1);
+          ctx.lineTo(
+            x1 - head * Math.cos(a - 0.4),
+            y1 - head * Math.sin(a - 0.4),
+          );
+          ctx.moveTo(x1, y1);
+          ctx.lineTo(
+            x1 - head * Math.cos(a + 0.4),
+            y1 - head * Math.sin(a + 0.4),
+          );
+          ctx.stroke();
+        }
+        if (number) {
+          const bx = Math.min(x0, x1),
+            by = Math.min(y0, y1),
+            r = Math.max(13, w * 0.016);
+          ctx.beginPath();
+          ctx.arc(bx, by, r, 0, Math.PI * 2);
+          ctx.fillStyle = COLOR;
+          ctx.fill();
+          ctx.fillStyle = "#fff";
+          ctx.font = `700 ${Math.round(r * 1.25)}px -apple-system,sans-serif`;
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(String(number), bx, by + 1);
+        }
+        ctx.restore();
+      }
+
+      function redraw() {
+        SURFACES.forEach((surface) => {
+          const cv = surface.marksCanvas,
+            ctx = cv.getContext("2d");
+          ctx.clearRect(0, 0, cv.width, cv.height);
+          marks
+            .filter((m) => m.item === surface.key)
+            .forEach((m) =>
+              strokeMark(ctx, m, cv.width, cv.height, numberOf(m)),
+            );
+          if (drawing && drawing.item === surface.key)
+            strokeMark(ctx, drawing, cv.width, cv.height, 0);
+        });
+      }
+
+      /* ---------------- contents list ---------------- */
+      // Stops are everything the list can jump to, in document order: a document, a heading of a draft,
+      // a page of a PDF.
+      let stops = [];
+      function collectStops() {
+        stops = [];
+        ITEMS.forEach((item) => {
+          const wrap = document.querySelector(
+            `.item[data-item="${CSS.escape(item.id)}"]`,
+          );
+          if (!wrap) return;
+          stops.push({
+            key: `doc:${item.id}`,
+            item: item.id,
+            el: wrap,
+            label: item.name,
+            cls: "doc",
+            kind:
+              item.kind === "text"
+                ? "Text"
+                : item.format === "pdf"
+                  ? "PDF"
+                  : "Image",
+          });
+          if (item.kind === "text") {
+            wrap.querySelectorAll("h1,h2,h3").forEach((h, i) => {
+              stops.push({
+                key: `h:${item.id}:${i}`,
+                item: item.id,
+                el: h,
+                label: h.textContent.trim(),
+                cls: h.tagName.toLowerCase(),
+              });
+            });
+          } else if (item.format === "pdf") {
+            [...SURFACES.values()]
+              .filter((s) => s.item === item.id)
+              .forEach((s) => {
+                stops.push({
+                  key: s.key,
+                  item: item.id,
+                  el: s.wrap,
+                  label: s.label,
+                  cls: "page",
+                  page: s.page,
+                  surface: s.key,
+                });
+              });
+          }
+        });
+      }
+
+      const countFor = (key) =>
+        [...marks, ...comments].filter((m) => m.item === key).length;
+      function countsByItem() {
+        const by = new Map();
+        const add = (id, n) => by.set(id, (by.get(id) || 0) + n);
+        marks.forEach((m) => add(SURFACES.get(m.item)?.item ?? m.item, 1));
+        comments.forEach((c) => add(c.item, 1));
+        edits().forEach((e) => add(e.item, 1));
+        return by;
+      }
+
+      function buildNav() {
+        collectStops();
+        const docs = ITEMS.length;
+        const pages = [...SURFACES.values()].filter((s) => s.page).length;
+        const heads = stops.filter(
+          (s) => s.cls === "h1" || s.cls === "h2" || s.cls === "h3",
+        ).length;
+        // Only when it helps. A single image gets no list and no button.
+        const wanted = docs >= 2 || pages >= 2 || heads >= 2;
+        const nav = document.getElementById("nav");
+        nav.hidden = !wanted;
+        document.getElementById("navbtn").hidden = !wanted;
+        if (!wanted) return;
+        const host = document.getElementById("navlist");
+        const by = countsByItem();
+        host.innerHTML = "";
+        ITEMS.forEach((item) => {
+          const mine = stops.filter((s) => s.item === item.id);
+          const head = mine[0];
+          if (!head) return;
+          const n = by.get(item.id) || 0;
+          host.append(
+            rowFor(
+              head,
+              `<span class="kindtag">${head.kind}</span>
+      <span class="nm">${esc(item.name)}</span>
+      ${item.format === "pdf" && pagesOf(item.id) ? `<span class="pg">${pagesOf(item.id)} p.</span>` : ""}
+      ${n ? `<span class="cnt">${n}</span>` : ""}`,
+              "file" + (n ? " has" : ""),
+            ),
+          );
+          mine
+            .slice(1)
+            .filter((s) => s.cls !== "page")
+            .forEach((s) => {
+              host.append(
+                rowFor(s, `<span class="nm">${esc(s.label)}</span>`, s.cls),
+              );
+            });
+          const pageStops = mine.filter((s) => s.cls === "page");
+          if (pageStops.length) {
+            const chips = document.createElement("div");
+            chips.className = "chips";
+            pageStops.forEach((s) => {
+              const b = document.createElement("button");
+              b.type = "button";
+              b.className = "chip" + (countFor(s.surface) ? " has" : "");
+              b.textContent = s.page;
+              b.dataset.stop = s.key;
+              b.setAttribute("aria-label", s.label);
+              b.onclick = () => jumpTo(s.key, true);
+              chips.append(b);
+            });
+            host.append(chips);
+          }
+        });
+        markCurrent();
+      }
+      const esc = (t) =>
+        t.replace(
+          /[&<>"]/g,
+          (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c],
+        );
+      const pagesOf = (id) =>
+        [...SURFACES.values()].filter((s) => s.item === id && s.page).length;
+
+      function rowFor(stop, inner, cls) {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = `nrow ${cls}`;
+        b.dataset.stop = stop.key;
+        b.innerHTML = inner;
+        b.onclick = () => jumpTo(stop.key, true);
+        return b;
+      }
+
+      // A jump NEVER touches the history. A page may close its own tab only while that tab has one
+      // history entry, so a `#hash` or a pushState here would quietly break Send-closes-the-tab.
+      function jumpTo(key, focus) {
+        const stop = stops.find((s) => s.key === key);
+        if (!stop) return;
+        const top =
+          stop.el.getBoundingClientRect().top -
+          stage.getBoundingClientRect().top;
+        stage.scrollTo({
+          top: stage.scrollTop + top - 12,
+          behavior: RM.matches ? "auto" : "smooth",
+        });
+        if (focus) {
+          stop.el.setAttribute("tabindex", "-1");
+          stop.el.focus({ preventScroll: true });
+        }
+        closeDrawers();
+        current = key;
+        markCurrent();
+      }
+
+      // Where am I: the last stop whose top is above a reading line at 30% of the stage. A band would
+      // lose the current heading while scrolling UP inside a long section; this does not.
+      let current = null,
+        ticking = false;
+      function trackPosition() {
+        const line =
+          stage.getBoundingClientRect().top + stage.clientHeight * 0.3;
+        let found = null;
+        for (const s of stops)
+          if (s.el.getBoundingClientRect().top <= line) found = s.key;
+          else break;
+        if (found && found !== current) {
+          current = found;
+          markCurrent();
+        }
+      }
+      function markCurrent() {
+        document.querySelectorAll("#navlist [data-stop]").forEach((el) => {
+          if (el.dataset.stop === current) {
+            el.setAttribute("aria-current", "location");
+            const r = el.getBoundingClientRect(),
+              n = document.getElementById("nav").getBoundingClientRect();
+            if (r.top < n.top || r.bottom > n.bottom)
+              el.scrollIntoView({ block: "nearest" });
+          } else el.removeAttribute("aria-current");
+        });
+      }
+      stage.addEventListener("scroll", () => {
+        if (ticking) return;
+        ticking = true;
+        requestAnimationFrame(() => {
+          ticking = false;
+          trackPosition();
+        });
+      });
+
+      /* ---------------- drawers ---------------- */
+      const backdrop = document.getElementById("backdrop");
+      function setDrawer(which, open) {
+        const cls = which === "nav" ? "nav-open" : "side-open";
+        document.body.classList.toggle(cls, open);
+        document.body.classList.toggle(
+          "drawer",
+          document.body.classList.contains("nav-open") ||
+            document.body.classList.contains("side-open"),
+        );
+        document
+          .getElementById(which === "nav" ? "navbtn" : "sidebtn")
+          .setAttribute("aria-expanded", String(open));
+      }
+      function closeDrawers() {
+        ["nav", "side"].forEach((w) => setDrawer(w, false));
+      }
+      function openSide() {
+        // a new note is useless behind a closed drawer
+        if (matchMedia("(max-width:760px)").matches) setDrawer("side", true);
+      }
+      document.getElementById("navbtn").onclick = () => {
+        const open = !document.body.classList.contains("nav-open");
+        closeDrawers();
+        setDrawer("nav", open);
+        if (open) document.querySelector("#navlist [data-stop]")?.focus();
+      };
+      document.getElementById("sidebtn").onclick = () => {
+        const open = !document.body.classList.contains("side-open");
+        closeDrawers();
+        setDrawer("side", open);
+      };
+      backdrop.onclick = () => {
+        const b = lastDrawerBtn();
+        closeDrawers();
+        b?.focus();
+      };
+      function lastDrawerBtn() {
+        if (document.body.classList.contains("nav-open"))
+          return document.getElementById("navbtn");
+        if (document.body.classList.contains("side-open"))
+          return document.getElementById("sidebtn");
+        return null;
+      }
+
+      /* ---------------- keys ---------------- */
+      const typing = () => {
+        const el = document.activeElement;
+        return (
+          !!el &&
+          (el.isContentEditable ||
+            ["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName))
+        );
+      };
+      document.addEventListener("keydown", (e) => {
+        // Cmd+Enter (Ctrl+Enter elsewhere) sends, from anywhere on the page including inside a note.
+        if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+          e.preventDefault();
+          const b = document.getElementById("send");
+          if (b && !b.disabled) b.click();
+          return;
+        }
+        if (e.key === "Escape" && document.body.classList.contains("drawer")) {
+          const b = lastDrawerBtn();
+          closeDrawers();
+          b?.focus();
+          return;
+        }
+        // Letters, not brackets: `[` needs Option on a German Mac layout, and a modifier fails this
+        // guard. Nothing fires while the caret is in a note or in an editable draft block.
+        if (typing() || e.metaKey || e.ctrlKey || e.altKey) return;
+        const inList = document.activeElement?.closest("#navlist");
+        if (inList && ["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) {
+          const rows = [...document.querySelectorAll("#navlist [data-stop]")];
+          const i = rows.indexOf(document.activeElement);
+          const next =
+            e.key === "Home"
+              ? 0
+              : e.key === "End"
+                ? rows.length - 1
+                : Math.min(
+                    rows.length - 1,
+                    Math.max(0, i + (e.key === "ArrowDown" ? 1 : -1)),
+                  );
+          rows[next]?.focus();
+          e.preventDefault();
+          return;
+        }
+        if (e.key === "j" || e.key === "k") {
+          if (!stops.length) return;
+          const i = stops.findIndex((s) => s.key === current);
+          const next =
+            e.key === "j"
+              ? Math.min(stops.length - 1, i + 1)
+              : Math.max(0, i - 1);
+          jumpTo(stops[next]?.key, false);
+          e.preventDefault();
+        } else if (e.key === "o" && !document.getElementById("nav").hidden) {
+          if (matchMedia("(min-width:1200px)").matches) {
+            const nav = document.getElementById("nav");
+            nav.classList.toggle("collapsed");
+            nav.style.display = nav.classList.contains("collapsed")
+              ? "none"
+              : "";
+            try {
+              localStorage.setItem(
+                "review:nav",
+                nav.classList.contains("collapsed") ? "0" : "1",
+              );
+            } catch (err) {}
+          } else document.getElementById("navbtn").click();
+          e.preventDefault();
+        }
+      });
+      try {
+        if (localStorage.getItem("review:nav") === "0") {
+          const nav = document.getElementById("nav");
+          nav.classList.add("collapsed");
+          nav.style.display = "none";
+        }
+      } catch (err) {}
+
+      /* ---------------- feedback list ---------------- */
+      function edits() {
+        const out = [];
+        document.querySelectorAll("[data-blk]").forEach((el) => {
+          const key = el.getAttribute("data-blk");
+          const before = originals.get(key),
+            after = norm(el.innerText);
+          if (before !== undefined && before !== after)
+            out.push({
+              key,
+              item: el.closest("[data-item]").dataset.item,
+              before,
+              after,
+              label: el.tagName.toLowerCase(),
+            });
+        });
+        return out;
+      }
+      const ordered = () => [...marks, ...comments].sort((a, b) => a.id - b.id);
+      const numberOf = (m) => ordered().findIndex((x) => x.id === m.id) + 1;
+      // The label of whatever a mark sits on. A draft restored after a PDF changed can name a page that
+      // is gone; that note is still the reviewer's, so it is shown and it is sent.
+      function whereOf(m) {
+        const surface = SURFACES.get(m.item);
+        if (surface) return surface.label;
+        const item = ITEMS.find((i) => i.id === m.item);
+        return item ? item.name : null;
+      }
+
+      // A note box that scrolls hides the sentence somebody just wrote, and they cannot see whether the
+      // end of it survived. Grow to fit instead.
+      function fit(ta) {
+        ta.style.height = "auto";
+        ta.style.height = `${Math.min(ta.scrollHeight + 2, 420)}px`;
+      }
+
+      function setActive(id) {
+        activeId = id;
+        document
+          .querySelectorAll("#feed .card")
+          .forEach((c) => c.classList.toggle("active", c.id === `fb-${id}`));
+        redraw(); // the canvas draws the active mark differently
+      }
+
+      function renderFeed() {
+        const host = document.getElementById("feed");
+        const list = ordered(),
+          eds = edits();
+        document.getElementById("sidecnt").textContent =
+          list.length + eds.length;
+        if (!list.length && !eds.length) {
+          host.innerHTML = `<p class="empty">Nothing yet. Circle a spot on an image or a PDF page, or
+      select text and click Comment. Typing in a draft counts as an edit on its own.</p>`;
+          redraw();
+          refreshCounts();
+          return;
+        }
+        host.innerHTML = "";
+        list.forEach((m, idx) => {
+          const place = whereOf(m);
+          const el = document.createElement("div");
+          el.className =
+            "card" +
+            (m.id === activeId ? " active" : "") +
+            (place ? "" : " orphan");
+          el.id = `fb-${m.id}`;
+          const where = place
+            ? `${esc(place)} · ${m.tool || "text"}`
+            : "that page is no longer in this file · still sent";
+          el.innerHTML = `<div class="top"><span class="badge">${idx + 1}</span>
         <span class="where">${where}</span><button class="del" title="delete">×</button></div>
-        ${m.quote ? `<div class="quote">${m.quote.slice(0,140)}</div>` : ""}
+        ${m.quote ? `<div class="quote">${esc(m.quote.slice(0, 140))}</div>` : ""}
         <textarea placeholder="What should be different here?"></textarea>`;
-    const ta = el.querySelector("textarea");
-    ta.value = m.note;
-    ta.oninput = e => { m.note = e.target.value; fit(ta); saveDraft(); };
-    fit(ta);
-    el.querySelector(".del").onclick = () => {
-      marks = marks.filter(x => x !== m); comments = comments.filter(x => x !== m);
-      renderFeed(); redraw(); saveDraft();
-    };
-    // Selecting a card must NOT re-render the feed. renderFeed() rebuilds every card from
-    // innerHTML, so a click inside the textarea destroyed the element it had just focused and
-    // the caret vanished on the first click. Toggle the class on the live nodes instead.
-    el.onclick = () => setActive(m.id);
-    host.append(el);
-  });
-  eds.forEach(e => {
-    const el = document.createElement("div");
-    el.className = "card";
-    el.innerHTML = `<div class="top"><span class="badge edit">✎</span>
-        <span class="where">${ITEMS.find(i => i.id === e.item).name} · edited</span></div>
-        <div class="diff"><span class="b">${e.before.slice(0,90)}</span><br>
-        <span class="a">${e.after.slice(0,90)}</span></div>`;
-    host.append(el);
-  });
-  redraw();
-}
+          const ta = el.querySelector("textarea");
+          ta.value = m.note;
+          ta.oninput = (e) => {
+            m.note = e.target.value;
+            fit(ta);
+            saveDraft();
+          };
+          fit(ta);
+          el.querySelector(".del").onclick = () => {
+            marks = marks.filter((x) => x !== m);
+            comments = comments.filter((x) => x !== m);
+            renderFeed();
+            redraw();
+            saveDraft();
+          };
+          // Selecting a card must NOT re-render the feed. renderFeed() rebuilds every card from
+          // innerHTML, so a click inside the textarea destroyed the element it had just focused and
+          // the caret vanished on the first click. Toggle the class on the live nodes instead.
+          el.onclick = (ev) => {
+            setActive(m.id);
+            if (ev.target.tagName !== "TEXTAREA" && SURFACES.get(m.item))
+              jumpTo(m.item, false);
+          };
+          host.append(el);
+        });
+        eds.forEach((e) => {
+          const el = document.createElement("div");
+          el.className = "card";
+          el.innerHTML = `<div class="top"><span class="badge edit">✎</span>
+        <span class="where">${esc(ITEMS.find((i) => i.id === e.item).name)} · edited</span></div>
+        <div class="diff"><span class="b">${esc(e.before.slice(0, 90))}</span><br>
+        <span class="a">${esc(e.after.slice(0, 90))}</span></div>`;
+          host.append(el);
+        });
+        redraw();
+        refreshCounts();
+      }
 
-/* ---------------- send ---------------- */
-function exportMedia(itemId) {
-  const box = document.querySelector(`.media[data-item="${itemId}"]`);
-  const img = box.querySelector("img"), w = img.naturalWidth, h = img.naturalHeight;
-  const over = document.createElement("canvas"); over.width = w; over.height = h;
-  const octx = over.getContext("2d"); octx.drawImage(img, 0, 0, w, h);
-  const mine = marks.filter(m => m.item === itemId);
-  mine.forEach(m => strokeMark(octx, m, w, h, numberOf(m)));
-  const crops = mine.map(m => {
-    const xs = m.tool === "free" ? m.path.map(p => p.x) : [m.x0, m.x1];
-    const ys = m.tool === "free" ? m.path.map(p => p.y) : [m.y0, m.y1];
-    let x0 = Math.min(...xs)*w, x1 = Math.max(...xs)*w, y0 = Math.min(...ys)*h, y1 = Math.max(...ys)*h;
-    const px = Math.max((x1-x0)*0.35, w*0.05), py = Math.max((y1-y0)*0.35, h*0.035);
-    x0 = Math.max(0, x0-px); y0 = Math.max(0, y0-py); x1 = Math.min(w, x1+px); y1 = Math.min(h, y1+py);
-    const cw = Math.max(24, Math.round(x1-x0)), ch = Math.max(24, Math.round(y1-y0));
-    const c = document.createElement("canvas"); c.width = cw; c.height = ch;
-    c.getContext("2d").drawImage(over, Math.round(x0), Math.round(y0), cw, ch, 0, 0, cw, ch);
-    return { mark: m.id, png: c.toDataURL("image/png") };
-  });
-  return { overview: over.toDataURL("image/png"), crops, marks: mine };
-}
+      // The list is also a map of where the feedback is, so its counts move with every note.
+      function refreshCounts() {
+        if (document.getElementById("nav").hidden) return;
+        const by = countsByItem();
+        document.querySelectorAll("#navlist .nrow.file").forEach((row) => {
+          const stop = stops.find((s) => s.key === row.dataset.stop);
+          const n = stop ? by.get(stop.item) || 0 : 0;
+          row.classList.toggle("has", n > 0);
+          const tag = row.querySelector(".cnt");
+          if (n && tag) tag.textContent = n;
+          else if (n)
+            row.insertAdjacentHTML(
+              "beforeend",
+              `<span class="cnt">${n}</span>`,
+            );
+          else if (tag) tag.remove();
+        });
+        document.querySelectorAll("#navlist .chip").forEach((chip) => {
+          chip.classList.toggle("has", countFor(chip.dataset.stop) > 0);
+        });
+      }
 
-/* ---------------- never lose what was typed ---------------- */
-// Everything lives in this page until Send, so a closed tab, a reload or a crash used to cost the
-// whole round. The state is posted to the server on every change, debounced, and read back on load.
-// No save may start once Send is pressed. A save still pending at that moment used to land after the
-// server had deleted the draft, so the next round on the same files opened with this round's notes
-// and text, and every restored block reported itself as an edit. Measured 2026-09-30: draft.json
-// written in the same second as the Send it should not have outlived.
-let saveTimer = null, sending = false;
-function saveDraft() {
-  clearTimeout(saveTimer);
-  if (sending) return;
-  saveTimer = setTimeout(() => {
-    const blocks = {};
-    document.querySelectorAll("[data-blk]").forEach(el => { blocks[el.getAttribute("data-blk")] = el.innerHTML; });
-    const body = JSON.stringify({ marks, comments, seq,
-      overall: document.getElementById("overall").value, blocks });
-    try { localStorage.setItem(`review:${window.__SESSION__}`, body); } catch (e) {}
-    fetch("/draft", { method: "POST", headers: { "Content-Type": "application/json" }, body })
-      .catch(() => {});
-  }, 400);
-}
+      /* ---------------- send ---------------- */
+      // Marks are cut from the PDF itself, at the scale the crop needs, not from what is on screen. A
+      // crop of 6pt type is legible because it is re-rendered at up to eight times page size.
+      const EXPORT_W = 1800,
+        CROP_LONG = 1500,
+        MAX_SCALE = 8;
 
-async function restoreDraft() {
-  let d = null, answered = false;
-  try {
-    const r = await fetch("/draft");
-    if (r.ok) { d = await r.json(); answered = true; }
-  } catch (e) {}
-  // A server that answers is the authority, and an empty answer means the round was sent or never
-  // started. The copy in this browser is only for a server that did not answer: after a Send, a
-  // second tab can still write one, and on a fixed port it would come back in the next round.
-  if (!answered) {
-    try { d = JSON.parse(localStorage.getItem(`review:${window.__SESSION__}`) || "null"); }
-    catch (e) { d = null; }
-  }
-  if (!d || (!d.marks?.length && !d.comments?.length && !d.overall && !d.blocks)) return;
-  marks = d.marks || []; comments = d.comments || [];
-  seq = d.seq || Math.max(0, ...marks.map(m => m.id), ...comments.map(c => c.id));
-  if (d.overall) document.getElementById("overall").value = d.overall;
-  Object.entries(d.blocks || {}).forEach(([key, htmlText]) => {
-    const el = document.querySelector(`[data-blk="${CSS.escape(key)}"]`);
-    if (el && el.innerHTML !== htmlText) el.innerHTML = htmlText;
-  });
-  renderFeed(); redraw();
-}
+      async function exportSurface(surface) {
+        const mine = marks.filter((m) => m.item === surface.key);
+        if (!mine.length) return null;
+        let over, w, h;
+        if (surface.pdfPage) {
+          const scale = Math.min(MAX_SCALE, EXPORT_W / surface.pt.w);
+          const vp = surface.pdfPage.getViewport({ scale });
+          w = Math.round(vp.width);
+          h = Math.round(vp.height);
+          over = document.createElement("canvas");
+          over.width = w;
+          over.height = h;
+          const ctx = over.getContext("2d");
+          ctx.fillStyle = "#fff";
+          ctx.fillRect(0, 0, w, h); // a PDF page has no background of its own
+          await surface.pdfPage.render({ canvasContext: ctx, viewport: vp })
+            .promise;
+          mine.forEach((m) => strokeMark(ctx, m, w, h, numberOf(m)));
+        } else {
+          const img = surface.img;
+          w = img.naturalWidth;
+          h = img.naturalHeight;
+          over = document.createElement("canvas");
+          over.width = w;
+          over.height = h;
+          const ctx = over.getContext("2d");
+          ctx.drawImage(img, 0, 0, w, h);
+          mine.forEach((m) => strokeMark(ctx, m, w, h, numberOf(m)));
+        }
+        const crops = [];
+        for (const m of mine) {
+          const xs = m.tool === "free" ? m.path.map((p) => p.x) : [m.x0, m.x1];
+          const ys = m.tool === "free" ? m.path.map((p) => p.y) : [m.y0, m.y1];
+          let fx0 = Math.min(...xs),
+            fx1 = Math.max(...xs),
+            fy0 = Math.min(...ys),
+            fy1 = Math.max(...ys);
+          const px = Math.max((fx1 - fx0) * 0.35, 0.05),
+            py = Math.max((fy1 - fy0) * 0.35, 0.035);
+          fx0 = Math.max(0, fx0 - px);
+          fy0 = Math.max(0, fy0 - py);
+          fx1 = Math.min(1, fx1 + px);
+          fy1 = Math.min(1, fy1 + py);
+          crops.push({
+            mark: m.id,
+            png: await cropPng(surface, over, m, fx0, fy0, fx1, fy1, w, h),
+          });
+        }
+        return { overview: over.toDataURL("image/png"), crops, marks: mine };
+      }
 
-// The snapshot of the original text has to be taken before a draft overwrites the blocks, or every
-// restored edit reports itself as unchanged.
-requestAnimationFrame(() => requestAnimationFrame(restoreDraft));
+      async function cropPng(surface, over, m, fx0, fy0, fx1, fy1, w, h) {
+        const c = document.createElement("canvas");
+        if (surface.pdfPage) {
+          const cw = (fx1 - fx0) * surface.pt.w,
+            ch = (fy1 - fy0) * surface.pt.h;
+          const scale = Math.max(
+            1,
+            Math.min(MAX_SCALE, CROP_LONG / Math.max(cw, ch)),
+          );
+          c.width = Math.max(24, Math.round(cw * scale));
+          c.height = Math.max(24, Math.round(ch * scale));
+          const ctx = c.getContext("2d");
+          ctx.fillStyle = "#fff";
+          ctx.fillRect(0, 0, c.width, c.height);
+          const vp = surface.pdfPage.getViewport({ scale });
+          await surface.pdfPage.render({
+            canvasContext: ctx,
+            viewport: vp,
+            transform: [
+              1,
+              0,
+              0,
+              1,
+              -fx0 * surface.pt.w * scale,
+              -fy0 * surface.pt.h * scale,
+            ],
+          }).promise;
+          ctx.save();
+          ctx.translate(
+            -fx0 * surface.pt.w * scale,
+            -fy0 * surface.pt.h * scale,
+          );
+          strokeMark(
+            ctx,
+            m,
+            surface.pt.w * scale,
+            surface.pt.h * scale,
+            numberOf(m),
+          );
+          ctx.restore();
+          return c.toDataURL("image/png");
+        }
+        const x0 = Math.round(fx0 * w),
+          y0 = Math.round(fy0 * h);
+        c.width = Math.max(24, Math.round((fx1 - fx0) * w));
+        c.height = Math.max(24, Math.round((fy1 - fy0) * h));
+        c.getContext("2d").drawImage(
+          over,
+          x0,
+          y0,
+          c.width,
+          c.height,
+          0,
+          0,
+          c.width,
+          c.height,
+        );
+        return c.toDataURL("image/png");
+      }
 
-// Cmd+Enter (Ctrl+Enter elsewhere) sends, from anywhere on the page including inside a note.
-document.addEventListener("keydown", e => {
-  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-    e.preventDefault();
-    const b = document.getElementById("send");
-    if (b && !b.disabled) b.click();
-  }
-});
+      /* ---------------- never lose what was typed ---------------- */
+      // Everything lives in this page until Send, so a closed tab, a reload or a crash used to cost the
+      // whole round. The state is posted to the server on every change, debounced, and read back on load.
+      // No save may start once Send is pressed. A save still pending at that moment used to land after the
+      // server had deleted the draft, so the next round on the same files opened with this round's notes
+      // and text, and every restored block reported itself as an edit. Measured 2026-09-30: draft.json
+      // written in the same second as the Send it should not have outlived.
+      let saveTimer = null,
+        sending = false;
+      function saveDraft() {
+        clearTimeout(saveTimer);
+        if (sending) return;
+        saveTimer = setTimeout(() => {
+          const blocks = {};
+          document.querySelectorAll("[data-blk]").forEach((el) => {
+            blocks[el.getAttribute("data-blk")] = el.innerHTML;
+          });
+          const body = JSON.stringify({
+            marks,
+            comments,
+            seq,
+            overall: document.getElementById("overall").value,
+            blocks,
+          });
+          try {
+            localStorage.setItem(`review:${window.__SESSION__}`, body);
+          } catch (e) {}
+          fetch("/draft", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body,
+          }).catch(() => {});
+        }, 400);
+      }
+      document.getElementById("overall").addEventListener("input", saveDraft);
 
-document.getElementById("send").onclick = async () => {
-  sending = true; clearTimeout(saveTimer);   // the batch below carries this state, see saveDraft
-  document.activeElement?.blur();            // a keystroke from here on would reach neither
-  document.getElementById("send").disabled = true;
-  document.getElementById("status").textContent = "sending…";
-  const eds = edits();
-  const pages = ITEMS.map(item => {
-    if (item.kind === "media") {
-      const mine = marks.filter(m => m.item === item.id);
-      if (!mine.length) return null;
-      const ex = exportMedia(item.id);
-      return { kind: "media", name: item.name, overview_png: ex.overview, crops: ex.crops,
-        comments: mine.map(m => ({ id: `m_${m.id}`, number: numberOf(m), tool: m.tool, note: m.note,
-          box: { x:+Math.min(m.x0,m.x1).toFixed(4), y:+Math.min(m.y0,m.y1).toFixed(4),
-                 w:+Math.abs(m.x1-m.x0).toFixed(4), h:+Math.abs(m.y1-m.y0).toFixed(4) } })) };
-    }
-    const mine = comments.filter(c => c.item === item.id);
-    const myEdits = eds.filter(e => e.item === item.id);
-    if (!mine.length && !myEdits.length) return null;
-    return { kind: "text", name: item.name,
-      comments: mine.map(c => ({ id: `c_${c.id}`, number: numberOf(c), quote: c.quote,
-                                 anchor: c.anchor, block: c.block, note: c.note })),
-      edits: myEdits.map(e => ({ block: e.key, label: e.label, before: e.before, after: e.after })) };
-  }).filter(Boolean);
+      async function restoreDraft() {
+        let d = null,
+          answered = false;
+        try {
+          const r = await fetch("/draft");
+          if (r.ok) {
+            d = await r.json();
+            answered = true;
+          }
+        } catch (e) {}
+        // A server that answers is the authority, and an empty answer means the round was sent or never
+        // started. The copy in this browser is only for a server that did not answer: after a Send, a
+        // second tab can still write one, and on a fixed port it would come back in the next round.
+        if (!answered) {
+          try {
+            d = JSON.parse(
+              localStorage.getItem(`review:${window.__SESSION__}`) || "null",
+            );
+          } catch (e) {
+            d = null;
+          }
+        }
+        if (
+          !d ||
+          (!d.marks?.length && !d.comments?.length && !d.overall && !d.blocks)
+        )
+          return;
+        marks = d.marks || [];
+        comments = d.comments || [];
+        seq =
+          d.seq ||
+          Math.max(0, ...marks.map((m) => m.id), ...comments.map((c) => c.id));
+        if (d.overall) document.getElementById("overall").value = d.overall;
+        Object.entries(d.blocks || {}).forEach(([key, htmlText]) => {
+          const el = document.querySelector(`[data-blk="${CSS.escape(key)}"]`);
+          if (el && el.innerHTML !== htmlText) el.innerHTML = htmlText;
+        });
+        renderFeed();
+        redraw();
+      }
 
-  const note = document.getElementById("overall").value;
-  const n = pages.reduce((s, p) => s + (p.comments || []).length + (p.edits || []).length, 0);
-  let r;
-  try {
-    r = await fetch("/send", { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pages, overall_note: note }) });
-  } catch (e) {
-    r = { ok: false, statusText: e.message };
-  }
-  const foot = document.querySelector("footer");
-  if (r.ok) {
-    // The page has to LOOK finished. The first version disabled the button, said "received" in 13px
-    // grey beside it, and left everything else live, so it read as a dead button on a live page and
-    // the sender clicked it again and again. Measured on the first real use, 2026-09-10.
-    document.body.classList.add("sent");
-    const items = n + (note.trim() ? 1 : 0);
-    try { localStorage.removeItem(`review:${window.__SESSION__}`); } catch (e) {}
-    foot.innerHTML = `<span class="done"><span class="tick">&#10003;</span><span>Sent.
+      // The snapshot of the original text has to be taken before a draft overwrites the blocks, or every
+      // restored edit reports itself as unchanged.
+      requestAnimationFrame(() =>
+        requestAnimationFrame(async () => {
+          await restoreDraft();
+          buildNav();
+          trackPosition();
+          // A hook, not a switch: nothing defines window.__TEST__ unless `selftest --browser`
+          // injects it, and the getters hand out the live state rather than a stale copy.
+          if (window.__TEST__)
+            window.__TEST__({
+              get stops() {
+                return stops;
+              },
+              get marks() {
+                return marks;
+              },
+              get comments() {
+                return comments;
+              },
+              jumpTo,
+              SURFACES,
+              anchorFor,
+              exportSurface,
+              setTool,
+              buildTextLayer,
+              textLayers,
+            });
+        }),
+      );
+
+      document.getElementById("send").onclick = async () => {
+        sending = true;
+        clearTimeout(saveTimer); // the batch below carries this state, see saveDraft
+        document.activeElement?.blur(); // a keystroke from here on would reach neither
+        document.getElementById("send").disabled = true;
+        document.getElementById("status").textContent = "sending…";
+        const eds = edits();
+        const pages = [];
+        for (const surface of SURFACES.values()) {
+          const ex = await exportSurface(surface);
+          if (!ex) continue;
+          pages.push({
+            kind: "media",
+            item: surface.item,
+            page: surface.page,
+            pages: surface.pages,
+            name: surface.label,
+            overview_png: ex.overview,
+            crops: ex.crops,
+            comments: ex.marks.map((m) => ({
+              id: `m_${m.id}`,
+              number: numberOf(m),
+              tool: m.tool,
+              note: m.note,
+              quote: m.quote,
+              anchor: m.anchor,
+              rects: m.rects,
+              box: {
+                x: +Math.min(m.x0, m.x1).toFixed(4),
+                y: +Math.min(m.y0, m.y1).toFixed(4),
+                w: +Math.abs(m.x1 - m.x0).toFixed(4),
+                h: +Math.abs(m.y1 - m.y0).toFixed(4),
+              },
+            })),
+          });
+        }
+        ITEMS.filter((i) => i.kind === "text").forEach((item) => {
+          const mine = comments.filter((c) => c.item === item.id);
+          const myEdits = eds.filter((e) => e.item === item.id);
+          if (!mine.length && !myEdits.length) return;
+          pages.push({
+            kind: "text",
+            item: item.id,
+            name: item.name,
+            comments: mine.map((c) => ({
+              id: `c_${c.id}`,
+              number: numberOf(c),
+              quote: c.quote,
+              anchor: c.anchor,
+              block: c.block,
+              note: c.note,
+            })),
+            edits: myEdits.map((e) => ({
+              block: e.key,
+              label: e.label,
+              before: e.before,
+              after: e.after,
+            })),
+          });
+        });
+
+        // A note whose page is gone (the file changed between two rounds) is still the reviewer's text.
+        // It goes with the overall note rather than nowhere.
+        const orphans = ordered().filter((m) => !whereOf(m) && m.note.trim());
+        let note = document.getElementById("overall").value;
+        if (orphans.length) {
+          note = [
+            note.trim(),
+            ...orphans.map(
+              (m) =>
+                `About a page that is no longer in the file: ${m.note.trim()}`,
+            ),
+          ]
+            .filter(Boolean)
+            .join("\n");
+        }
+        const n = pages.reduce(
+          (s, p) => s + (p.comments || []).length + (p.edits || []).length,
+          0,
+        );
+        let r;
+        try {
+          r = await fetch("/send", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ pages, overall_note: note }),
+          });
+        } catch (e) {
+          r = { ok: false, statusText: e.message };
+        }
+        const foot = document.querySelector("footer");
+        if (r.ok) {
+          // The page has to LOOK finished. The first version disabled the button, said "received" in 13px
+          // grey beside it, and left everything else live, so it read as a dead button on a live page and
+          // the sender clicked it again and again. Measured on the first real use, 2026-09-10.
+          document.body.classList.add("sent");
+          closeDrawers();
+          const items = n + (note.trim() ? 1 : 0);
+          try {
+            localStorage.removeItem(`review:${window.__SESSION__}`);
+          } catch (e) {}
+          foot.innerHTML = `<span class="done"><span class="tick">&#10003;</span><span>Sent.
       ${items} item${items === 1 ? "" : "s"} went to the agent.
       <small>Closing this window.</small></span></span>`;
-    // A browser lets a page close its own tab only while that tab has one history entry, and it does
-    // not care what sent the batch: a review opened in a tab that already showed a page is refused,
-    // by a click and by Cmd+Enter alike. Measured 2026-09-30 in Edge. window.closed turns true at once
-    // when the browser accepts and stays false when it refuses. The server is told either way, closes
-    // a refused tab from outside where it can, and stops. A page that is still here after that says
-    // plainly that it is finished, rather than pretend it closed.
-    setTimeout(async () => {
-      window.close();
-      await fetch("/close", { method: "POST", keepalive: true,
-        body: JSON.stringify({ refused: !window.closed }) }).catch(() => {});
-      setTimeout(() => {
-        const s = foot.querySelector(".done small");
-        if (s) s.textContent = "Nothing more to do here. You can close this window.";
-      }, 400);
-    }, 900);
-  } else if (r.status === 409) {
-    // Another tab of this review sent first. Nothing from this tab went, and a retry cannot help.
-    document.getElementById("status").textContent =
-      "already sent from another tab, nothing from this tab was sent";
-  } else {
-    sending = false; saveDraft();              // the save cancelled at Send still has to happen
-    document.getElementById("send").disabled = false;
-    document.getElementById("status").textContent =
-      `send failed (${r.statusText || "no reply"}), your marks are still here, try again`;
-  }
-};
-</script>
-</body></html>
+          // A browser lets a page close its own tab only while that tab has one history entry, and it does
+          // not care what sent the batch: a review opened in a tab that already showed a page is refused,
+          // by a click and by Cmd+Enter alike. Measured 2026-09-30 in Edge. window.closed turns true at once
+          // when the browser accepts and stays false when it refuses. The server is told either way, closes
+          // a refused tab from outside where it can, and stops. A page that is still here after that says
+          // plainly that it is finished, rather than pretend it closed.
+          setTimeout(async () => {
+            window.close();
+            await fetch("/close", {
+              method: "POST",
+              keepalive: true,
+              body: JSON.stringify({ refused: !window.closed }),
+            }).catch(() => {});
+            setTimeout(() => {
+              const s = foot.querySelector(".done small");
+              if (s)
+                s.textContent =
+                  "Nothing more to do here. You can close this window.";
+            }, 400);
+          }, 900);
+        } else if (r.status === 409) {
+          // Another tab of this review sent first. Nothing from this tab went, and a retry cannot help.
+          document.getElementById("status").textContent =
+            "already sent from another tab, nothing from this tab was sent";
+        } else {
+          sending = false;
+          saveDraft(); // the save cancelled at Send still has to happen
+          document.getElementById("send").disabled = false;
+          document.getElementById("status").textContent =
+            `send failed (${r.statusText || "no reply"}), your marks are still here, try again`;
+        }
+      };
+    </script>
+  </body>
+</html>

@@ -18,10 +18,14 @@ DESIGN
 - Python standard library only. No pip, no npm, no Node, works offline.
 - The browser renders the marked-up overview and cuts one crop per mark, so this file needs no
   image library at all.
+- A PDF is served as the PDF, and the browser draws its pages with the vendored copy of PDF.js in
+  assets/vendor/pdfjs (Apache-2.0, pinned, checksummed, never fetched at run time). So a page is
+  as sharp as the screen allows, its text can be selected, and this file renders nothing.
 - Sessions live in ~/.claude/.review/<id>/ and hold everything the agent reads back.
 
 USAGE
   review open draft.md card.png form.pdf     stage anything, open the page, return at once
+  review open deck.pptx                      one page per slide, plus the speaker notes as text
   review poll [--session ID] [--ack]         block until Send, print the batch as JSON
   review status [--session ID]               is a batch waiting
   review close [--session ID]                stop the server
@@ -30,28 +34,45 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import hashlib
 import html as html_mod
 import http.server
 import json
 import os
+import posixpath
 import re
+import secrets
 import shlex
 import shutil
 import signal
 import socketserver
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+import urllib.error
+import urllib.request
 import webbrowser
+import xml.etree.ElementTree as ET
+import zipfile
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 ROOT = Path.home() / ".claude" / ".review"
-APP = Path(__file__).resolve().parent.parent / "assets" / "review.html"
+ASSETS = Path(__file__).resolve().parent.parent / "assets"
+APP = ASSETS / "review.html"
+VENDOR = ASSETS / "vendor" / "pdfjs"
+# Exactly what /vendor/ may serve. A name that is not in here is a 404, so no request can walk out
+# of the folder and no file lands in the page that the checksum file does not cover.
+VENDOR_FILES = ("pdf.min.mjs", "pdf.worker.min.mjs")
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 TEXT_SUFFIXES = {".md", ".markdown", ".html", ".htm", ".txt"}
+CONTENT_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                 ".gif": "image/gif", ".webp": "image/webp", ".pdf": "application/pdf",
+                 ".mjs": "text/javascript; charset=utf-8", ".js": "text/javascript; charset=utf-8",
+                 ".json": "application/json"}
 
 
 # --------------------------------------------------------------------------- markdown
@@ -158,40 +179,160 @@ def resolve_session(arg: str | None) -> Path:
     return d
 
 
-def pdf_to_pngs(pdf: Path, out_dir: Path) -> list[Path]:
-    if shutil.which("pdftoppm"):
-        subprocess.run(["pdftoppm", "-r", "130", "-png", str(pdf), str(out_dir / pdf.stem)],
-                       check=True, capture_output=True)
-        return sorted(out_dir.glob(f"{pdf.stem}*.png"))
-    if shutil.which("sips"):                       # macOS fallback, first page only
-        out = out_dir / f"{pdf.stem}.png"
-        subprocess.run(["sips", "-s", "format", "png", str(pdf), "--out", str(out)],
-                       check=True, capture_output=True)
-        return [out]
-    print(f"skipping {pdf.name}: no pdftoppm and no sips to render it", file=sys.stderr)
-    return []
+def slug(text: str, limit: int = 40) -> str:
+    """A file-name-safe piece of a title, for a human reading the session directory."""
+    return re.sub(r"\W+", "_", text).strip("_")[:limit] or "file"
+
+
+def clear_assets(adir: Path, keep: set[Path]) -> None:
+    """Empty the session's asset folder, except for files that are themselves inputs.
+
+    TWO DEFECTS LIVED HERE, both measured 2026-10-02 against the old renderer, which wrote one PNG
+    per PDF page and collected them back with the glob `<stem>*.png`:
+
+      * A PDF that shrank from 6 pages to 3 came back with 6. The renderer overwrote three files
+        and the glob picked up the three left over from the round before. The reviewer approved
+        pages that no longer existed.
+      * `doc.pdf` opened together with `doc-summary.png` showed that image twice, once as a page of
+        the PDF, because `doc*.png` matches `doc-summary.png`.
+
+    Both are gone by construction now: nothing is globbed, and every open re-stages from the
+    current file into a name derived from the document's position in the session. This function is
+    the belt to that pair of braces, so a file from an earlier round cannot survive in the folder
+    and be served by name.
+    """
+    if not adir.exists():
+        return
+    for p in sorted(adir.iterdir()):
+        if p.resolve() in keep:
+            continue                    # reviewing a file that already lives in the session folder
+        if p.is_dir():
+            shutil.rmtree(p, ignore_errors=True)
+        else:
+            p.unlink(missing_ok=True)
+
+
+PML = "{http://schemas.openxmlformats.org/presentationml/2006/main}"
+DML = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+RELS = "{http://schemas.openxmlformats.org/package/2006/relationships}"
+R_ID = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+
+
+def _rel_targets(z: zipfile.ZipFile, part: str) -> dict[str, str]:
+    """Relationship id -> absolute part name, for one part of an OOXML package."""
+    folder, name = part.rsplit("/", 1)
+    rels = f"{folder}/_rels/{name}.rels"
+    if rels not in z.namelist():
+        return {}
+    out = {}
+    for rel in ET.fromstring(z.read(rels)).iter(f"{RELS}Relationship"):
+        target = rel.get("Target", "")
+        out[rel.get("Id")] = posixpath.normpath(posixpath.join(folder, target)).lstrip("/")
+    return out
+
+
+def pptx_notes(pptx: Path) -> list[str]:
+    """The speaker notes of every slide, in presentation order; "" for a slide without notes.
+
+    A PDF of a deck carries no notes, so a review of the PDF alone never shows the talk track.
+    """
+    with zipfile.ZipFile(pptx) as z:
+        pres = "ppt/presentation.xml"
+        targets = _rel_targets(z, pres)
+        notes = []
+        for sld in ET.fromstring(z.read(pres)).iter(f"{PML}sldId"):
+            slide = targets.get(sld.get(R_ID), "")
+            note_part = next((t for t in _rel_targets(z, slide).values() if "notesSlide" in t), None)
+            if not note_part or note_part not in z.namelist():
+                notes.append("")
+                continue
+            paras = []
+            for sp in ET.fromstring(z.read(note_part)).iter(f"{PML}sp"):
+                ph = sp.find(f".//{PML}ph")
+                if ph is None or ph.get("type") != "body":
+                    continue  # the slide image and the slide number are not the talk track
+                for para in sp.iter(f"{DML}p"):
+                    paras.append("".join(t.text or "" for t in para.iter(f"{DML}t")))
+            notes.append("\n".join(paras).strip())
+        return notes
+
+
+def pptx_to_pdf(pptx: Path, out_dir: Path) -> Path | None:
+    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    if not soffice:
+        print(f"skipping {pptx.name}: needs LibreOffice (soffice) to render slides", file=sys.stderr)
+        return None
+    subprocess.run([soffice, "--headless", "--convert-to", "pdf", "--outdir", str(out_dir),
+                    str(pptx)], check=True, capture_output=True)
+    return out_dir / f"{pptx.stem}.pdf"
+
+
+def notes_html(notes: list[str]) -> str:
+    blocks = []
+    for k, text in enumerate(notes, start=1):
+        body = "".join(f"<p>{html_mod.escape(line)}</p>" for line in text.split("\n") if line.strip())
+        blocks.append(f"<h3>Slide {k}</h3>{body or '<p><em>no speaker notes</em></p>'}")
+    return "".join(blocks)
 
 
 def stage_inputs(paths: list[Path], sess: Path) -> list[dict]:
+    """One item per DOCUMENT, never per page.
+
+    A PDF is copied as a PDF and the browser draws its pages, so this knows nothing about page
+    counts and cannot get them wrong. Each document gets an id from its position in the session
+    (`d1`, `d2`, …) and an asset name that carries that id, which is also why two files with one
+    name in different folders stay two documents here instead of overwriting each other.
+    """
     adir = sess / "assets"
     adir.mkdir(parents=True, exist_ok=True)
+    clear_assets(adir, {p.resolve() for p in paths if p.exists()})
     items: list[dict] = []
+
+    def base(stem: str) -> tuple[str, str]:
+        ident = f"d{len(items) + 1}"
+        return ident, f"{ident}_{slug(stem)}"
+
     for src in paths:
         if not src.exists():
             sys.exit(f"no such file: {src}")
         suffix = src.suffix.lower()
-        if suffix == ".pdf":
-            for page in pdf_to_pngs(src, adir):
-                items.append({"kind": "media", "id": re.sub(r"\W+", "_", page.stem),
-                              "name": page.name, "url": f"/asset/{page.name}",
-                              "source": str(src.resolve())})
+        if suffix == ".pptx":
+            pdf = pptx_to_pdf(src, adir)
+            if pdf is None:
+                continue
+            if not pdf.exists():
+                # LibreOffice exits 0 and writes nothing often enough to matter: a locked profile,
+                # a deck it refuses. A missing file here must read as a skipped deck, not as a
+                # traceback in a forked server nobody is watching.
+                print(f"skipping {src.name}: LibreOffice wrote no PDF for it", file=sys.stderr)
+                continue
+            ident, asset = base(src.stem)
+            dest = pdf.rename(adir / f"{asset}.pdf")
+            items.append({"kind": "media", "format": "pdf", "id": ident, "asset": asset,
+                          "name": src.name, "url": f"/asset/{dest.name}",
+                          "source": str(src.resolve()), "page_label": "slide", "deck": True})
+            ident, asset = base(f"{src.stem}_notes")
+            items.append({"kind": "text", "id": ident, "asset": asset,
+                          "name": f"{src.stem} speaker notes", "format": "html",
+                          "html": notes_html(pptx_notes(src)), "source": str(src.resolve()),
+                          "notes_of": str(src.resolve())})
             continue
-        if suffix in IMAGE_SUFFIXES:
-            dest = adir / src.name
+        if suffix == ".pdf":
+            ident, asset = base(src.stem)
+            dest = adir / f"{asset}.pdf"
             if src.resolve() != dest.resolve():
                 shutil.copy2(src, dest)
-            items.append({"kind": "media", "id": re.sub(r"\W+", "_", dest.stem),
-                          "name": dest.name, "url": f"/asset/{dest.name}",
+            items.append({"kind": "media", "format": "pdf", "id": ident, "asset": asset,
+                          "name": src.name, "url": f"/asset/{dest.name}",
+                          "source": str(src.resolve()), "page_label": "page"})
+            continue
+        if suffix in IMAGE_SUFFIXES:
+            ident, asset = base(src.stem)
+            dest = adir / f"{asset}{suffix}"
+            if src.resolve() != dest.resolve():
+                shutil.copy2(src, dest)
+            items.append({"kind": "media", "format": "image", "id": ident, "asset": asset,
+                          "name": src.name, "url": f"/asset/{dest.name}",
                           "source": str(src.resolve())})
             continue
         if suffix in TEXT_SUFFIXES:
@@ -204,11 +345,12 @@ def stage_inputs(paths: list[Path], sess: Path) -> list[dict]:
                 fmt = "text"
             else:
                 body, fmt = render_markdown(raw), "markdown"
-            items.append({"kind": "text", "id": re.sub(r"\W+", "_", src.stem),
+            ident, asset = base(src.stem)
+            items.append({"kind": "text", "id": ident, "asset": asset,
                           "name": src.name, "format": fmt, "html": body,
                           "source": str(src.resolve())})
             continue
-        print(f"skipping {src.name}: reviewable types are images, PDF, Markdown, HTML, txt",
+        print(f"skipping {src.name}: reviewable types are images, PDF, PowerPoint, Markdown, HTML, txt",
               file=sys.stderr)
     if not items:
         sys.exit("nothing to review among the given files")
@@ -221,22 +363,34 @@ def write_outputs(sess: Path, payload: dict) -> dict:
     crops_dir = sess / "crops"
     crops_dir.mkdir(exist_ok=True)
     try:
-        sources = {i["name"]: i.get("source") for i in json.loads((sess / "items.json").read_text())}
+        staged = {i["id"]: i for i in json.loads((sess / "items.json").read_text())}
     except (OSError, ValueError):
-        sources = {}
+        staged = {}
 
     lines = ["# Review", ""]
     pages_out = []
     for page in payload.get("pages", []):
-        name = page["name"]
-        src = sources.get(name)
+        # Keyed by the document id, never by the name. A page of a PDF is labelled
+        # "statement.pdf, page 2", two inputs can carry one file name, and neither is a key.
+        item = staged.get(page.get("item"), {})
+        src = item.get("source")
+        name = page.get("name") or item.get("name") or page.get("item")
         entry = {"kind": page["kind"], "name": name, "source": src}
-        lines += [f"## {name}", ""]
+        number = page.get("page")
+        if item.get("format") == "pdf" and number:
+            entry.update({"document": item.get("name"), "page": number,
+                          "pages": page.get("pages")})
+            if item.get("deck"):
+                entry["slide"] = number     # a deck page: edits map back to this slide
+        heading = f"{name} of {page['pages']}" if number and page.get("pages") else name
+        lines += [f"## {heading}", ""]
         if src:
             lines.append(f"Original: `{src}`")
 
         if page["kind"] == "media":
-            stem = re.sub(r"\W+", "_", Path(name).stem)
+            stem = item.get("asset") or slug(Path(name).stem)
+            if number:
+                stem = f"{stem}_p{number:02d}"
             over = sess / f"overview_{stem}.png"
             over.write_bytes(base64.b64decode(page["overview_png"].split(",", 1)[1]))
             by_id = {c["mark"]: c for c in page.get("crops", [])}
@@ -247,10 +401,18 @@ def write_outputs(sess: Path, payload: dict) -> dict:
                 raw = by_id.get(int(c["id"].split("_")[1]), {}).get("png")
                 if raw:
                     crop.write_bytes(base64.b64decode(raw.split(",", 1)[1]))
-                marks.append({"id": c["id"], "number": c["number"], "tool": c["tool"],
-                              "note": c["note"].strip(), "box": c["box"],
-                              "crop": str(crop) if raw else None})
-                lines.append(f"{c['number']}. ({c['tool']}) {c['note'].strip() or '[no text]'}")
+                mark = {"id": c["id"], "number": c["number"], "tool": c["tool"],
+                        "note": c["note"].strip(), "box": c["box"],
+                        "crop": str(crop) if raw else None}
+                # A mark made by selecting text in a PDF carries what was selected, so the agent
+                # gets the exact words as well as the picture. Drawn marks have none of this.
+                for extra in ("quote", "anchor", "rects"):
+                    if c.get(extra) is not None:
+                        mark[extra] = c[extra]
+                marks.append(mark)
+                quoted = f' "{c["quote"][:70]}"' if c.get("quote") else ""
+                lines.append(f"{c['number']}. ({c['tool']}){quoted} "
+                             f"{c['note'].strip() or '[no text]'}")
                 if raw:
                     lines.append(f"   crop: `{crop}`")
             entry.update({"overview": str(over), "marks": marks})
@@ -279,9 +441,13 @@ def write_outputs(sess: Path, payload: dict) -> dict:
     (sess / "marks.md").write_text("\n".join(lines))
     (sess / "batch.json").write_text(json.dumps(batch, indent=2, ensure_ascii=False))
     # Receipt: a fact other gates can read, instead of a claim that he looked.
+    files = sorted({p["source"] for p in pages_out if p.get("source")})
+    # The hash pins WHICH bytes were reviewed: a rebuilt deck at the same path is a new review.
+    hashes = {f: hashlib.sha256(Path(f).read_bytes()).hexdigest() for f in files if Path(f).is_file()}
     (sess / "receipt.json").write_text(json.dumps(
         {"reviewed_at": batch["received_at"],
-         "files": [p["source"] for p in pages_out if p.get("source")],
+         "files": files,
+         "sha256": hashes,
          "items": sum(len(p.get("marks", [])) + len(p.get("comments", [])) + len(p.get("edits", []))
                       for p in pages_out)}, indent=2))
     return batch
@@ -377,7 +543,27 @@ def foreign(method: str, headers) -> bool:
     return origin is not None and urlsplit(origin).hostname not in LOOPBACK
 
 
-def serve(sess: Path, items: list[dict], port: int = 0) -> None:
+# The page carries one vendored dependency (PDF.js) that parses documents nobody vetted, so the
+# page is locked down rather than trusted: nothing loads from anywhere but this server, nothing can
+# call out, and the only scripts that run are the two this server stamps with a fresh nonce. The
+# nonce is also what keeps an `onclick=` or a `javascript:` link inside a REVIEWED HTML draft from
+# running, which plain 'unsafe-inline' would allow. Images are 'self' too, so a remote image in a
+# draft stays blank instead of telling its host that the draft was opened.
+CSP = ("default-src 'none'; script-src 'nonce-{nonce}'; style-src 'self' 'unsafe-inline'; "
+       "img-src 'self' data: blob:; connect-src 'self'; worker-src 'self' blob:; "
+       "font-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+# Where the server writes the session globals. A literal <script> would be ambiguous once the page
+# gained a second one, and the module script cannot be the injection point because its opening tag
+# is not the bare string.
+BOOT = "/*__BOOT__*/"
+
+
+def content_type(path: Path) -> str:
+    return CONTENT_TYPES.get(path.suffix.lower(), "application/octet-stream")
+
+
+def serve(sess: Path, items: list[dict], port: int = 0, test_js: str = "",
+          ready=None) -> None:
     app = APP.read_text()
     sent = threading.Event()
 
@@ -388,34 +574,51 @@ def serve(sess: Path, items: list[dict], port: int = 0) -> None:
         def log_message(self, *_a):
             pass
 
-        def _send(self, code, body: bytes, ctype="text/html; charset=utf-8"):
+        def _send(self, code, body: bytes, ctype="text/html; charset=utf-8", extra=()):
             self.send_response(code)
             self.send_header("Content-Type", ctype)
+            # Every asset is declared, so nothing has to be guessed from its bytes. A PDF that a
+            # browser decides to treat as HTML is a cross-site scripting hole in this origin.
+            self.send_header("X-Content-Type-Options", "nosniff")
+            for key, value in extra:
+                self.send_header(key, value)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
 
+        @property
+        def route(self) -> str:
+            """The path without its query string. `/?x=1` is the page, not a 404."""
+            return urlsplit(self.path).path
+
         def do_GET(self):
             if foreign("GET", self.headers):
                 return self._send(403, b"forbidden", "text/plain")
-            if self.path in ("/", "/index.html"):
-                page = app.replace("<script>",
-                                   "<script>window.__SESSION__=%s;window.__ITEMS__=%s;</script><script>"
-                                   % (json.dumps(sess.name), json.dumps(items)), 1)
-                return self._send(200, page.encode())
-            if self.path == "/draft":
+            if self.route in ("/", "/index.html"):
+                nonce = secrets.token_urlsafe(16)
+                page = (app.replace(BOOT, "window.__SESSION__=%s;window.__ITEMS__=%s;%s"
+                                    % (json.dumps(sess.name), json.dumps(items), test_js), 1)
+                           .replace("__NONCE__", nonce))
+                return self._send(200, page.encode(),
+                                  extra=(("Content-Security-Policy", CSP.format(nonce=nonce)),))
+            if self.route == "/draft":
                 f = sess / "draft.json"
                 return self._send(200, f.read_bytes() if f.exists() else b"{}",
                                   "application/json")
-            if self.path.startswith("/asset/"):
+            if self.route.startswith("/vendor/"):
+                name = Path(unquote(self.route[len("/vendor/"):])).name
+                if name not in VENDOR_FILES or not (VENDOR / name).exists():
+                    return self._send(404, b"not found", "text/plain")
+                # A year, because the name carries no hash and the folder changes only when
+                # somebody runs the update procedure in assets/vendor/pdfjs/README.md.
+                return self._send(200, (VENDOR / name).read_bytes(), content_type(VENDOR / name),
+                                  extra=(("Cache-Control", "max-age=31536000, immutable"),))
+            if self.route.startswith("/asset/"):
                 # The browser percent-encodes the name ("a b.png" arrives as "a%20b.png").
-                f = sess / "assets" / Path(unquote(self.path[len("/asset/"):])).name
+                f = sess / "assets" / Path(unquote(self.route[len("/asset/"):])).name
                 if not f.exists():
                     return self._send(404, b"not found", "text/plain")
-                ctype = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-                         ".gif": "image/gif", ".webp": "image/webp"}.get(f.suffix.lower(),
-                                                                        "application/octet-stream")
-                return self._send(200, f.read_bytes(), ctype)
+                return self._send(200, f.read_bytes(), content_type(f))
             self._send(404, b"not found", "text/plain")
 
         def do_POST(self):
@@ -427,14 +630,14 @@ def serve(sess: Path, items: list[dict], port: int = 0) -> None:
             # costs nothing: a crashed tab, a closed window, a reload mid-sentence. It is deliberately
             # dumb (last write wins, whole state, no merge) because the alternative is a merge bug
             # that loses exactly the note somebody cared enough to retype.
-            if self.path == "/draft":
+            if self.route == "/draft":
                 # After Send the round is over. A late save, from this page or from a second tab on
                 # the same review, would hand the notes of this round to the next one on these files.
                 if sent.is_set():
                     return self._send(409, b'{"ok":false}', "application/json")
                 (sess / "draft.json").write_bytes(raw)
                 return self._send(200, b'{"ok":true}', "application/json")
-            if self.path == "/close":
+            if self.route == "/close":
                 # After Send the page reports how closing its own tab went. A refused tab is closed
                 # from outside where that is allowed, and the server stops either way.
                 if not sent.is_set():
@@ -448,7 +651,7 @@ def serve(sess: Path, items: list[dict], port: int = 0) -> None:
                 closed = close_tab((base, base + "index.html")) if refused else 0
                 stop(0.3)                       # before the reply, which can raise
                 return self._send(200, json.dumps({"closed": closed}).encode(), "application/json")
-            if self.path != "/send":
+            if self.route != "/send":
                 return self._send(404, b"not found", "text/plain")
             if sent.is_set():                   # a second tab on a review that is already sent
                 return self._send(409, b'{"ok":false}', "application/json")
@@ -497,6 +700,8 @@ def serve(sess: Path, items: list[dict], port: int = 0) -> None:
     with httpd:
         (sess / "url").write_text(f"http://127.0.0.1:{httpd.server_address[1]}/")
         (sess / "server.pid").write_text(str(os.getpid()))
+        if ready:
+            ready(httpd)        # the selftest runs this server in a thread and has to stop it
         httpd.serve_forever()
 
 
@@ -599,16 +804,149 @@ def cmd_close(args) -> int:
     return 0
 
 
-def cmd_selftest(_args) -> int:
+def make_fixture_pdf(path: Path, pages: list[list[tuple[int, int, int, str]]]) -> None:
+    """A real PDF, written here, so the tests never depend on a file somebody has to supply.
+
+    Helvetica text at positions this function chose, which is the ground truth the browser test
+    reads back out of the text layer. Uncompressed and classic cross-reference table: the point is
+    a file every parser accepts, not a small one.
+    """
+    def esc(t: str) -> str:
+        return t.replace("\\", r"\\").replace("(", r"\(").replace(")", r"\)")
+
+    objs: dict[int, bytes] = {}
+    n = len(pages)
+    page_ids = [4 + 2 * i for i in range(n)]
+    objs[1] = b"<</Type/Catalog/Pages 2 0 R>>"
+    kids = " ".join(f"{i} 0 R" for i in page_ids)
+    objs[2] = f"<</Type/Pages/Kids[{kids}]/Count {n}>>".encode()
+    objs[3] = b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica/Encoding/WinAnsiEncoding>>"
+    for i, lines in enumerate(pages):
+        pid, cid = page_ids[i], page_ids[i] + 1
+        body = "\n".join(f"BT /F1 {size} Tf 1 0 0 1 {x} {y} Tm ({esc(text)}) Tj ET"
+                         for x, y, size, text in lines).encode("latin-1", "replace")
+        objs[pid] = (f"<</Type/Page/Parent 2 0 R/MediaBox[0 0 595 842]"
+                     f"/Resources<</Font<</F1 3 0 R>>>>/Contents {cid} 0 R>>").encode()
+        objs[cid] = b"<</Length %d>>stream\n%s\nendstream" % (len(body), body)
+
+    out = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets = {}
+    for num in sorted(objs):
+        offsets[num] = len(out)
+        out += b"%d 0 obj\n%s\nendobj\n" % (num, objs[num])
+    start = len(out)
+    top = max(objs) + 1
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % top
+    for num in range(1, top):
+        out += b"%010d 00000 n \n" % offsets.get(num, 0)
+    out += b"trailer\n<</Size %d/Root 1 0 R>>\nstartxref\n%d\n%%%%EOF\n" % (top, start)
+    path.write_bytes(bytes(out))
+
+
+# One pixel, transparent. Enough to stand in for a staged image: nothing here decodes it.
+PNG_1PX = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5"
+           "ErkJggg==")
+
+
+def _write_tiny_pptx(path: Path) -> None:
+    """Two slides, notes on the first only: just the parts pptx_notes reads."""
+    rel = ('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+           '{}</Relationships>')
+    one = '<Relationship Id="{}" Type="x" Target="{}"/>'
+    p = 'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"'
+    a = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
+    r = 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"'
+    para = "<a:p><a:r><a:t>{}</a:t></a:r></a:p>"
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("ppt/presentation.xml", f'<p:presentation {p} {r}><p:sldIdLst>'
+                   '<p:sldId id="256" r:id="rId2"/><p:sldId id="257" r:id="rId3"/>'
+                   "</p:sldIdLst></p:presentation>")
+        z.writestr("ppt/_rels/presentation.xml.rels",
+                   rel.format(one.format("rId2", "slides/slide1.xml")
+                              + one.format("rId3", "slides/slide2.xml")))
+        z.writestr("ppt/slides/slide1.xml", f"<p:sld {p}/>")
+        z.writestr("ppt/slides/slide2.xml", f"<p:sld {p}/>")
+        z.writestr("ppt/slides/_rels/slide1.xml.rels",
+                   rel.format(one.format("rId9", "../notesSlides/notesSlide1.xml")))
+        z.writestr("ppt/notesSlides/notesSlide1.xml",
+                   f'<p:notes {p} {a}><p:cSld><p:spTree>'
+                   '<p:sp><p:nvSpPr><p:nvPr><p:ph type="sldNum"/></p:nvPr></p:nvSpPr>'
+                   f'<p:txBody>{para.format("3")}</p:txBody></p:sp>'
+                   '<p:sp><p:nvSpPr><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr><p:txBody>'
+                   f'{para.format("Say the why.")}{para.format("Then the ask.")}</p:txBody></p:sp>'
+                   "</p:spTree></p:cSld></p:notes>")
+
+
+FIXTURE_PAGES = [
+    [(72, 760, 20, "Fixture statement"),
+     (72, 700, 12, "Interest 1.234,56 EUR for the period"),
+     (72, 670, 12, "Section 1: placeholder text on page one"),
+     (72, 640, 12, "The same placeholder appears twice in this document"),
+     (72, 120, 6, "Footnote at six point, which a crop has to keep legible")],
+    [(72, 760, 20, "Second page"),
+     (72, 700, 12, "Section 2: another line to select")],
+    [(72, 760, 20, "Third page"),
+     (72, 700, 12, "Nothing of interest here")],
+]
+FIXTURE_DRAFT = ("# Fixture draft\n\nA paragraph that says placeholder once and then says "
+                 "placeholder a second time.\n\n## Second heading\n\nMore text.\n")
+CHROME_CANDIDATES = (
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    "google-chrome", "google-chrome-stable", "chromium", "chromium-browser",
+)
+
+
+def find_chrome() -> str | None:
+    for c in CHROME_CANDIDATES:
+        if Path(c).exists():
+            return c
+        found = shutil.which(c)
+        if found:
+            return found
+    return None
+
+
+def vendor_mismatches() -> list[str]:
+    """Every vendored file that is not byte for byte what SHA256SUMS records.
+
+    A formatter, a half-finished update or a tampered copy all land here, and the page never gets
+    to load any of them: the test fails first.
+    """
+    sums = VENDOR / "SHA256SUMS"
+    if not sums.exists():
+        return ["SHA256SUMS is missing"]
+    bad = []
+    for line in sums.read_text().splitlines():
+        want, _, name = line.partition("  ")
+        f = VENDOR / name.strip()
+        if not f.exists():
+            bad.append(f"{name}: missing")
+        elif hashlib.sha256(f.read_bytes()).hexdigest() != want:
+            bad.append(f"{name}: changed")
+    return bad
+
+
+def cmd_selftest(args) -> int:
+    failures: list[str] = []
+
+    def check(name: str, got, want=True) -> None:
+        if got == want:
+            print(f"ok   {name}")
+            return
+        failures.append(name)
+        print(f"FAIL {name}\n       got  {got!r}\n       want {want!r}")
+
     md = render_markdown("# H\n\ntext **b** and `c`\n\n- one\n- two\n\n> quote\n")
-    assert "<h1>H</h1>" in md and "<strong>b</strong>" in md and "<li>one</li>" in md, md
-    assert "<blockquote>quote</blockquote>" in md, md
+    check("markdown subset", all(x in md for x in ("<h1>H</h1>", "<strong>b</strong>",
+                                                   "<li>one</li>", "<blockquote>quote</blockquote>")))
     body = html_body("<html><body><p>keep</p><script>drop()</script></body></html>")
-    assert "keep" in body and "drop" not in body, body
+    check("html body keeps content and drops script", "keep" in body and "drop" not in body)
     tbl = render_markdown("| a | b |\n|---|---|\n| 1 | 2 |\n")
-    assert "<th>a</th>" in tbl and "<td>2</td>" in tbl, tbl
+    check("markdown table", "<th>a</th>" in tbl and "<td>2</td>" in tbl)
+
     ok = {"Host": "127.0.0.1:8000"}
-    for method, headers, want in (
+    origin_cases = (
             ("GET", ok, False), ("POST", ok, False),                  # curl sends no browser headers
             ("POST", {**ok, "Sec-Fetch-Site": "same-origin"}, False),
             ("POST", {**ok, "Sec-Fetch-Site": "cross-site"}, True),
@@ -616,10 +954,395 @@ def cmd_selftest(_args) -> int:
             ("POST", {**ok, "Origin": "http://localhost:8000"}, False),
             ("POST", {**ok, "Origin": "https://example.com"}, True),
             ("GET", {"Host": "rebound.example.com:8000"}, True),     # DNS rebinding
-            ("GET", {"Host": "127.0.0.1@example.com"}, True), ("GET", {}, True)):
-        assert foreign(method, headers) is want, (method, headers)
-    print("selftest ok: markdown subset, html body extraction, table, request origin check")
-    return 0
+            ("GET", {"Host": "127.0.0.1@example.com"}, True), ("GET", {}, True))
+    check("request origin check",
+          [foreign(m, h) for m, h, _ in origin_cases], [w for _, _, w in origin_cases])
+
+    with tempfile.TemporaryDirectory() as tmp:
+        deck = Path(tmp) / "deck.pptx"
+        _write_tiny_pptx(deck)
+        check("pptx speaker notes", pptx_notes(deck), ["Say the why.\nThen the ask.", ""])
+        check("a slide without notes says so",
+              "<h3>Slide 2</h3><p><em>no speaker notes</em></p>" in notes_html(pptx_notes(deck)))
+
+    # ---- the vendored parser -------------------------------------------------------------
+    check("vendored pdf.js matches its checksums", vendor_mismatches(), [])
+    page = APP.read_text()
+    check("the page has the injection point and the nonce slot",
+          BOOT in page and "__NONCE__" in page)
+    # The page may reach nothing but this server. A URL with a host in it would be a third-party
+    # request from a page that holds private documents.
+    remote = [u for u in re.findall(r'(?:src|href|from|import)\s*=?\s*["\'](//[^"\']+|https?://[^"\']+)',
+                                    page)]
+    check("the page loads nothing from another host", remote, [])
+
+    # ---- staging: the two defects of 2026-10-02 ------------------------------------------
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        sess = tmp / "sess"
+        sess.mkdir()
+        doc = tmp / "doc.pdf"
+        make_fixture_pdf(doc, FIXTURE_PAGES)                       # three pages
+        items = stage_inputs([doc], sess)
+        check("a PDF is one item, not one per page", len(items), 1)
+        check("a PDF is served as a PDF", items[0].get("format"), "pdf")
+        check("the staged PDF is the file itself",
+              (sess / "assets" / Path(items[0]["url"]).name).read_bytes(), doc.read_bytes())
+        first_assets = sorted(p.name for p in (sess / "assets").iterdir())
+
+        # REGRESSION, stale pages: the same path, now two pages. The old renderer left the third
+        # page of the previous round in the folder and showed it again.
+        make_fixture_pdf(doc, FIXTURE_PAGES[:2])
+        items = stage_inputs([doc], sess)
+        check("a PDF that shrank leaves nothing behind",
+              sorted(p.name for p in (sess / "assets").iterdir()), first_assets)
+        check("the staged PDF is the CURRENT file",
+              (sess / "assets" / Path(items[0]["url"]).name).read_bytes(), doc.read_bytes())
+
+        # REGRESSION, glob over-match: doc-summary.png was collected as a page of doc.pdf,
+        # because the old code globbed <stem>*.png.
+        summary = tmp / "doc-summary.png"
+        summary.write_bytes(base64.b64decode(PNG_1PX))
+        items = stage_inputs([summary, doc], sess)
+        check("an image whose name starts with the PDF's is not a page of it",
+              [(i["name"], i.get("format"), Path(i["url"]).suffix) for i in items],
+              [("doc-summary.png", "image", ".png"), ("doc.pdf", "pdf", ".pdf")])
+        check("no asset from an earlier round survives",
+              sorted(p.name for p in (sess / "assets").iterdir()),
+              ["d1_doc_summary.png", "d2_doc.pdf"])
+
+        # Two files with one name in different folders used to write one asset and share one id.
+        (tmp / "a").mkdir(); (tmp / "b").mkdir()
+        for d in ("a", "b"):
+            (tmp / d / "same.png").write_bytes(base64.b64decode(PNG_1PX))
+        items = stage_inputs([tmp / "a" / "same.png", tmp / "b" / "same.png"], sess)
+        check("two files with one name stay two documents",
+              len({i["id"] for i in items}) == 2 and len({i["url"] for i in items}) == 2)
+
+    # ---- the batch -----------------------------------------------------------------------
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        sess = tmp / "sess"
+        sess.mkdir()
+        card = tmp / "card.png"
+        card.write_bytes(base64.b64decode(PNG_1PX))
+        draft = tmp / "draft.md"
+        draft.write_text(FIXTURE_DRAFT)
+        pdf = tmp / "statement.pdf"
+        make_fixture_pdf(pdf, FIXTURE_PAGES)
+        items = stage_inputs([card, draft, pdf], sess)
+        data = "data:image/png;base64," + PNG_1PX
+        batch = write_outputs(sess, {"pages": [
+            {"kind": "media", "item": "d1", "name": "card.png", "overview_png": data,
+             "crops": [{"mark": 1, "png": data}],
+             "comments": [{"id": "m_1", "number": 1, "tool": "ellipse", "note": "head smaller",
+                           "box": {"x": 0.30, "y": 0.05, "w": 0.40, "h": 0.17}}]},
+            {"kind": "text", "item": "d2", "name": "draft.md",
+             "comments": [{"id": "c_2", "number": 2, "quote": "placeholder",
+                           "anchor": {"prefix": "says ", "suffix": " a second"},
+                           "block": "d2#1", "note": "cut this"}],
+             "edits": [{"block": "d2#0", "label": "h1", "before": "A", "after": "B"}]},
+            {"kind": "media", "item": "d3", "page": 2, "pages": 3, "name": "statement.pdf, page 2",
+             "overview_png": data, "crops": [{"mark": 3, "png": data}],
+             "comments": [{"id": "m_3", "number": 3, "tool": "text", "note": "this total is wrong",
+                           "quote": "1.234,56", "anchor": {"prefix": "Interest ", "suffix": " EUR"},
+                           "rects": [{"x": 0.19, "y": 0.22, "w": 0.09, "h": 0.02}],
+                           "box": {"x": 0.19, "y": 0.22, "w": 0.09, "h": 0.02}}]},
+        ], "overall_note": "the rest is fine"})
+
+        image_page, text_page, pdf_page = batch["pages"]
+        # Backward compatibility is the promise: every field a reader used still carries the same
+        # name, type and meaning, and `kind` is still only "media" or "text".
+        check("batch keeps the documented top level",
+              sorted(batch), ["overall_note", "pages", "received_at", "session", "status"])
+        check("batch kinds are unchanged", sorted({p["kind"] for p in batch["pages"]}),
+              ["media", "text"])
+        check("an image page keeps its fields", sorted(image_page),
+              ["kind", "marks", "name", "overview", "source"])
+        check("an image mark keeps its fields", sorted(image_page["marks"][0]),
+              ["box", "crop", "id", "note", "number", "tool"])
+        check("a text page keeps its fields", sorted(text_page),
+              ["comments", "edits", "edits_saved", "kind", "name", "source"])
+        check("source points at the original file", image_page["source"], str(card.resolve()))
+        check("the crop was written", Path(image_page["marks"][0]["crop"]).exists())
+        # Additions, and only additions, on a PDF page.
+        check("a PDF page says which document and which page",
+              [pdf_page["document"], pdf_page["page"], pdf_page["pages"], pdf_page["kind"]],
+              ["statement.pdf", 2, 3, "media"])
+        check("a PDF page is named by its label", pdf_page["name"], "statement.pdf, page 2")
+        check("a selection mark carries the words that were selected",
+              sorted(pdf_page["marks"][0]),
+              ["anchor", "box", "crop", "id", "note", "number", "quote", "rects", "tool"])
+        check("the overview of a PDF page is named by document and page",
+              Path(pdf_page["overview"]).name, "overview_d3_statement_p02.png")
+        check("marks.md names the page in full",
+              "## statement.pdf, page 2 of 3" in (sess / "marks.md").read_text())
+        check("marks.md quotes the selection",
+              '"1.234,56"' in (sess / "marks.md").read_text())
+        check("the receipt lists every reviewed file",
+              len(json.loads((sess / "receipt.json").read_text())["sha256"]), 3)
+
+        # A deck page reports the slide it came from, which is how an edit finds its way back.
+        deck_items = [dict(items[2], deck=True, page_label="slide")]
+        (sess / "items.json").write_text(json.dumps(deck_items))
+        deck_batch = write_outputs(sess, {"pages": [
+            {"kind": "media", "item": "d3", "page": 2, "pages": 3, "name": "deck, slide 2",
+             "overview_png": data, "crops": [], "comments": []}]})
+        check("a deck page keeps its slide number", deck_batch["pages"][0].get("slide"), 2)
+
+    # ---- the server ----------------------------------------------------------------------
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        sess = tmp / "sess"
+        sess.mkdir()
+        pdf = tmp / "statement.pdf"
+        make_fixture_pdf(pdf, FIXTURE_PAGES)
+        items = stage_inputs([pdf], sess)
+        with serving(sess, items) as base:
+            page, headers = fetch(base)
+            csp = headers.get("Content-Security-Policy", "")
+            nonce = re.search(r"'nonce-([\w-]+)'", csp)
+            check("the page carries a Content-Security-Policy", csp.startswith("default-src 'none'"))
+            check("the policy allows no inline script but the two it stamps",
+                  "'unsafe-inline'" not in csp.split("style-src")[0])
+            check("the nonce in the policy is the nonce in the page",
+                  bool(nonce) and page.count(f'nonce="{nonce.group(1)}"'), 2)
+            check("the session globals were injected", "window.__ITEMS__=[" in page)
+            check("no injection point is left in the served page", BOOT in page, False)
+            body, headers = fetch(base + "asset/" + Path(items[0]["url"]).name)
+            check("a PDF is served as a PDF", headers.get("Content-Type"), "application/pdf")
+            check("nothing may be sniffed", headers.get("X-Content-Type-Options"), "nosniff")
+            _, headers = fetch(base + "vendor/pdf.min.mjs")
+            check("the vendored module is served as JavaScript",
+                  headers.get("Content-Type"), "text/javascript; charset=utf-8")
+            check("the vendor folder serves nothing else",
+                  fetch(base + "vendor/SHA256SUMS")[1].get("status"), 404)
+            check("the vendor folder cannot be walked out of",
+                  fetch(base + "vendor/..%2f..%2fSKILL.md")[1].get("status"), 404)
+
+    if args.browser:
+        browser_selftest(check)
+    else:
+        print("note: the browser cases need --browser")
+
+    print(f"\n{'PASS' if not failures else 'FAIL'}: {len(failures)} failure(s)")
+    return 1 if failures else 0
+
+
+@contextlib.contextmanager
+def serving(sess: Path, items: list[dict], test_js: str = ""):
+    """The real server, in a thread, for the length of a test."""
+    box: list = []
+    t = threading.Thread(target=serve, args=(sess, items, 0, test_js, box.append), daemon=True)
+    t.start()
+    for _ in range(200):
+        if box:
+            break
+        time.sleep(0.02)
+    if not box:
+        raise RuntimeError("the test server did not start")
+    try:
+        yield f"http://127.0.0.1:{box[0].server_address[1]}/"
+    finally:
+        box[0].shutdown()
+
+
+def fetch(url: str) -> tuple[str, dict]:
+    req = urllib.request.Request(url, headers={"Host": "127.0.0.1"})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.read().decode("utf-8", "replace"), {**dict(r.headers), "status": r.status}
+    except urllib.error.HTTPError as e:
+        return "", {"status": e.code}
+
+
+# Injected ONLY by the browser selftest, through serve(test_js=...). The shipped page never sees
+# it, and the hook it calls does nothing unless this defines window.__TEST__ first.
+TEST_JS = r"""
+window.__TEST__ = async (api) => {
+  const out = [];
+  const say = (name, got, want) => out.push([name, got, want]);
+  const until = async (fn, ms) => { const t0 = Date.now();
+    while (Date.now() - t0 < (ms || 20000)) { try { if (fn()) return true; } catch (e) {}
+      await new Promise(r => setTimeout(r, 60)); } return false; };
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const mode = new URLSearchParams(location.search).get("mode") || "wide";
+  const nav = document.getElementById("nav"), stage = document.getElementById("stage");
+  // A jump scrolls smoothly, so a measurement taken too early reads the middle of the animation
+  // and blames whatever ran last. Wait until the stage stops moving.
+  const settle = async () => { let last = NaN;
+    for (let i = 0; i < 80; i++) { await sleep(70);
+      if (stage.scrollTop === last) return; last = stage.scrollTop; } };
+  const inkOf = cv => { if (!cv.width) return 0;
+    const d = cv.getContext("2d").getImageData(0, 0, cv.width, cv.height).data;
+    let n = 0; for (let i = 0; i < d.length; i += 4) if (d[i] < 200 && d[i + 3] > 0) n++;
+    return n; };
+  try {
+    say("the viewport meta tag is there",
+        !!document.querySelector('meta[name="viewport"][content*="width=device-width"]'), true);
+    const pdfPages = () => [...api.SURFACES.values()].filter(s => s.page);
+    await until(() => pdfPages().length === 3);
+    say("every page of the PDF is a surface", pdfPages().length, 3);
+    const first = pdfPages()[0];
+    await until(() => inkOf(first.sheet) > 200);
+    say("the first page is drawn, not blank", inkOf(first.sheet) > 200, true);
+    say("the page canvas carries the screen's own pixels",
+        first.sheet.width, Math.floor(first.box.clientWidth * devicePixelRatio));
+    await until(() => api.textLayers.size >= 3 && first.layer.textContent.length > 20);
+    say("the text of the page can be read back",
+        first.layer.textContent.includes("Interest 1.234,56"), true);
+
+    // A selection inside one page keeps the spaces between the words.
+    const spans = [...first.layer.querySelectorAll("span")].filter(s => s.textContent.trim());
+    const range = document.createRange();
+    range.setStart(spans[1].firstChild, 0);
+    range.setEnd(spans[1].firstChild, spans[1].textContent.length);
+    const sel = getSelection(); sel.removeAllRanges(); sel.addRange(range);
+    say("a selection comes back with its spaces", /\S \S/.test(sel.toString()), true);
+    const anchored = api.anchorFor(first.layer, range);
+    say("the anchor of a PDF selection carries the quote",
+        anchored.quote === range.toString() && anchored.quote.length > 3, true);
+    sel.removeAllRanges();
+
+    // The same anchor function on a draft block: the SECOND "placeholder", not the first.
+    const blk = [...document.querySelectorAll("[data-blk]")]
+      .find(b => (b.textContent.match(/placeholder/g) || []).length === 2);
+    const node = blk.firstChild, text = node.textContent;
+    const at = text.indexOf("placeholder", text.indexOf("placeholder") + 1);
+    const r2 = document.createRange();
+    r2.setStart(node, at); r2.setEnd(node, at + "placeholder".length);
+    const a2 = api.anchorFor(blk, r2);
+    say("a repeated phrase anchors to the occurrence that was selected",
+        a2.at === at && a2.anchor.prefix.endsWith("then says "), true);
+
+    // Marks on a PDF page, and the crop that comes out of them.
+    api.marks.push({ id: 900, item: first.key, tool: "rect", note: "look here",
+                     x0: 0.10, y0: 0.05, x1: 0.60, y1: 0.12, path: [] });
+    const ex = await api.exportSurface(first);
+    const img = new Image();
+    await new Promise(res => { img.onload = res; img.onerror = res; img.src = ex.crops[0].png; });
+    const cc = document.createElement("canvas");
+    cc.width = img.width; cc.height = img.height;
+    cc.getContext("2d").drawImage(img, 0, 0);
+    const cp = cc.getContext("2d").getImageData(0, 0, cc.width, cc.height).data;
+    let cink = 0;
+    for (let i = 0; i < cp.length; i += 4) if (cp[i] < 200) cink++;
+    say("the crop of a PDF mark has ink in it", cink > 50, true);
+    say("the crop is cut at a readable size", img.width >= 400, true);
+    api.marks.length = 0;
+
+    say("a PDF session opens in Select text",
+        document.querySelector('.tool[data-tool="select"]').getAttribute("aria-pressed"), "true");
+
+    // The contents list.
+    say("the contents list is shown", nav.hidden, false);
+    say("it lists both documents", document.querySelectorAll("#navlist .nrow.file").length, 2);
+    say("it has one chip per page", document.querySelectorAll("#navlist .chip").length, 3);
+    const h0 = history.length;
+    for (let i = 0; i < 10; i++) api.jumpTo(api.stops[i % api.stops.length].key, false);
+    await settle();
+    say("ten jumps add no history entry", history.length, h0);
+
+    const where = () => document.querySelector('#navlist [aria-current="location"]')?.dataset.stop;
+    stage.scrollTo({ top: 0, behavior: "auto" }); await settle(); await sleep(120);
+    const atTop = where();
+    stage.scrollTo({ top: stage.scrollHeight, behavior: "auto" }); await settle(); await sleep(120);
+    const atEnd = where();
+    stage.scrollTo({ top: 0, behavior: "auto" }); await settle(); await sleep(120);
+    say("the top of the session is the first page", atTop, api.stops[1].key);
+    say("the current entry follows the scroll down", atEnd !== atTop && !!atEnd, true);
+    say("and comes back on the way up", where(), atTop);
+
+    const ta = document.getElementById("overall");
+    ta.focus();
+    await settle();
+    const before = stage.scrollTop;
+    ta.dispatchEvent(new KeyboardEvent("keydown", { key: "j", bubbles: true }));
+    await sleep(250);
+    say("j does not jump while the caret is in a note", stage.scrollTop, before);
+    ta.blur();
+    document.body.focus();
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "j", bubbles: true }));
+    await settle();
+    say("and j does jump when it is not", stage.scrollTop !== before, true);
+
+    if (mode === "narrow") {
+      say("no horizontal overflow at this width",
+          document.documentElement.scrollWidth <= window.innerWidth, true);
+      say("the stage uses the width", stage.clientWidth > window.innerWidth - 40, true);
+      say("the contents list starts closed", nav.getBoundingClientRect().right <= 1, true);
+      document.getElementById("navbtn").click(); await sleep(300);
+      say("the Contents button opens it as a drawer",
+          Math.round(nav.getBoundingClientRect().left), 0);
+      say("the backdrop is up", getComputedStyle(document.getElementById("backdrop")).display,
+          "block");
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      await sleep(300);
+      say("Escape closes it", nav.getBoundingClientRect().right <= 1, true);
+      say("and focus goes back to the button", document.activeElement.id, "navbtn");
+      document.getElementById("sidebtn").click(); await sleep(300);
+      say("the feedback list is a drawer too",
+          Math.round(document.getElementById("side").getBoundingClientRect().right),
+          Math.round(window.innerWidth));
+      const small = [...document.querySelectorAll("button:not([hidden])")]
+        .filter(b => b.offsetParent !== null)
+        .filter(b => b.getBoundingClientRect().height < 24 || b.getBoundingClientRect().width < 24);
+      say("every visible button is at least 24 px", small.map(b => b.id || b.className), []);
+    }
+  } catch (e) {
+    out.push(["the browser test itself ran to the end", String(e && e.stack || e), true]);
+  }
+  fetch("/draft", { method: "POST", headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ __test__: out }) });
+};
+"""
+
+
+def browser_selftest(check) -> None:
+    chrome = find_chrome()
+    if not chrome:
+        print("skip: the browser cases need Chrome or Chromium, and neither is installed")
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        sess = tmp / "sess"
+        sess.mkdir()
+        pdf = tmp / "statement.pdf"
+        make_fixture_pdf(pdf, FIXTURE_PAGES)
+        draft = tmp / "draft.md"
+        draft.write_text(FIXTURE_DRAFT)
+        items = stage_inputs([pdf, draft], sess)
+        with serving(sess, items, test_js=TEST_JS) as base:
+            for mode, size in (("wide", "1440,900"), ("narrow", "390,844")):
+                (sess / "draft.json").unlink(missing_ok=True)
+                # No --dump-dom and no virtual time: this Chrome prints its DOM and then hangs on
+                # shutdown (measured 2026-10-02, Chrome 141), and virtual time freezes the page
+                # before pdf.js has drawn anything. The page reports its own results instead, and
+                # the browser is killed as soon as they arrive.
+                proc = subprocess.Popen(
+                    [chrome, "--headless=new", "--disable-gpu", "--no-first-run",
+                     "--no-default-browser-check", "--disable-extensions",
+                     "--disable-background-networking", "--disable-component-update",
+                     "--disable-sync", f"--user-data-dir={tmp}/profile-{mode}",
+                     f"--window-size={size}", "--force-device-scale-factor=2",
+                     f"{base}?mode={mode}"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                results = None
+                deadline = time.time() + 90
+                while time.time() < deadline and results is None:
+                    f = sess / "draft.json"
+                    if f.exists():
+                        try:
+                            results = json.loads(f.read_text()).get("__test__")
+                        except ValueError:
+                            results = None
+                    time.sleep(0.05)
+                proc.terminate()
+                if results is None:
+                    check(f"the browser reported its results ({mode})", "no results", "results")
+                    continue
+                for name, got, want in results:
+                    check(f"{name} [{mode}]", got, want)
 
 
 def main() -> int:
@@ -640,7 +1363,11 @@ def main() -> int:
     p.add_argument("--timeout", type=float, default=0); p.set_defaults(fn=cmd_poll)
     s = sub.add_parser("status"); s.add_argument("--session"); s.set_defaults(fn=cmd_status)
     c = sub.add_parser("close"); c.add_argument("--session"); c.set_defaults(fn=cmd_close)
-    t = sub.add_parser("selftest"); t.set_defaults(fn=cmd_selftest)
+    t = sub.add_parser("selftest")
+    t.add_argument("--browser", action="store_true",
+                   help="also drive the page in headless Chrome: pdf.js rendering, the text "
+                        "layer, the contents list, and the phone layout at 390x844")
+    t.set_defaults(fn=cmd_selftest)
     args = ap.parse_args()
     return args.fn(args)
 

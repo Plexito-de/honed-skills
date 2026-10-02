@@ -6,9 +6,24 @@ description: >-
   a note per mark. Use before anything they will read, print or publish: post, spec, plan, report,
   newsletter, landing page, deck, invitation, poster, chart, rendered design, screenshot.
 license: Apache-2.0
+compatibility: >-
+  Requires Python 3.9+ and nothing from pip, npm or Node. PDF pages are drawn in the browser by a
+  pinned, checksummed copy of PDF.js (Apache-2.0) that ships in assets/vendor/pdfjs and is served
+  from 127.0.0.1, so no renderer has to be installed and nothing is fetched at run time. A
+  PowerPoint deck still needs LibreOffice (`soffice`) to become a PDF first. Works offline.
+  Agent-agnostic.
 metadata:
-  version: "1.1.1"
-  changeSummary: Frontmatter only. metadata values are strings under the Agent Skills spec, so isBreaking is now "false" rather than a YAML boolean. The skill itself is unchanged.
+  version: "1.2.0"
+  changeSummary: >-
+    A PDF is now the PDF: pages are drawn to canvas at the screen's pixel ratio by a vendored
+    PDF.js, their text can be selected, copied, found with Ctrl+F and commented on like a Markdown
+    draft, and every crop is re-rendered from the file instead of cut from a 130 dpi raster. So
+    poppler and sips are no longer needed at all. Adds a contents list with page chips, feedback
+    counts and j/k/o keys, drawers and a viewport tag for a phone, and a Content-Security-Policy
+    with a per-response nonce. Fixes two staging defects: a PDF that shrank kept showing its old
+    pages, and `doc-summary.png` was attached as a page of `doc.pdf`. The batch gains fields and
+    loses none; a PDF page is now labelled "statement.pdf, page 2" rather than "statement-1.png",
+    and an unsent draft from 1.1 keeps its notes but marks them as orphaned.
   isBreaking: "false"
 ---
 
@@ -36,6 +51,7 @@ skills/human-review/bin/review poll --session <id>               # blocks until 
 skills/human-review/bin/review poll --ack                        # clears the batch you handled
 skills/human-review/bin/review status                            # is a batch waiting
 skills/human-review/bin/review close                             # stop a review nobody sends
+skills/human-review/bin/review selftest [--browser]              # 42 offline cases, 49 more in Chrome
 ```
 
 1. Write or render the draft.
@@ -50,29 +66,101 @@ skills/human-review/bin/review close                             # stop a review
 
 ## What the reviewer can do
 
-| On | How | What you get back |
-| --- | --- | --- |
-| An image or a PDF page | circle, box, freehand or arrow, one note per mark | the picture with the marks rendered into it, plus one padded crop per mark |
-| A Markdown, HTML or text draft | select any text, click Comment, type the note | the quote with a prefix and suffix anchor, and the block it sits in |
-| The same draft | type straight into it | a before and after per block |
+| On                             | How                                               | What you get back                                                          |
+| ------------------------------ | ------------------------------------------------- | -------------------------------------------------------------------------- |
+| An image or a PDF page         | circle, box, freehand or arrow, one note per mark | the picture with the marks rendered into it, plus one padded crop per mark |
+| A PDF page                     | select the words themselves, click Comment        | the same, plus the exact quote, its anchor and one rectangle per line      |
+| A Markdown, HTML or text draft | select any text, click Comment, type the note     | the quote with a prefix and suffix anchor, and the block it sits in        |
+| The same draft                 | type straight into it                             | a before and after per block                                               |
 
 Every item lands in one numbered list. Their "2" is your "2", on a picture and in a paragraph alike.
+
+A PDF is drawn page by page by PDF.js, at the pixel ratio of the screen, so it is as sharp as a PDF
+viewer and its text behaves like text: selectable, copyable, and findable with the browser's own
+Ctrl+F across every page of the session. Every crop of a PDF page is re-rendered from the file at up
+to eight times page size, so six-point type in a footnote is legible in the crop.
+
+## Finding the way around a long session
+
+A session of ten documents and eighty pages is 100,000 pixels of scroll. From two documents on (or
+one document with two pages or two headings) a contents list appears at the top left: every
+document with its kind, its page count and how much feedback sits on it, one chip per page, and the
+headings of a draft. The entry you are reading is marked, and the counts move as notes are written,
+so the list is also a map of where the feedback is.
+
+- `j` and `k` go to the next and previous stop, `o` shows and hides the list, `Esc` closes a drawer.
+  None of them fires while the caret is in a note or in an editable block.
+- Inside the list: arrow keys, Home, End, Enter.
+- **No jump touches the browser history**, because a page may only close its own tab while that tab
+  has one history entry, and Send closes the tab.
+- Below 1200 px the list is a drawer behind a Contents button. Below 760 px the feedback list is a
+  drawer too, the document gets the whole width, and a bottom bar carries Feedback and Send. That is
+  the phone layout, and it is checked at 390x844 by `selftest --browser`.
 
 ## The batch
 
 ```json
-{ "status": "feedback", "session": "0281f317ca76",
+{
+  "status": "feedback",
+  "session": "0281f317ca76",
   "pages": [
-    { "kind": "media", "name": "card.png", "source": "/abs/card.png",
+    {
+      "kind": "media",
+      "name": "card.png",
+      "source": "/abs/card.png",
       "overview": "/…/overview_card.png",
-      "marks": [ { "number": 1, "tool": "ellipse", "note": "head smaller",
-                   "box": {"x":0.30,"y":0.05,"w":0.40,"h":0.17},
-                   "crop": "/…/crops/card_mark_01.png" } ] },
-    { "kind": "text", "name": "draft.md", "source": "/abs/draft.md", "edits_saved": false,
-      "comments": [ { "number": 2, "quote": "…", "anchor": {"prefix":"…","suffix":"…"},
-                      "block": "draft#4", "note": "cut this" } ],
-      "edits": [ { "block": "draft#2", "label": "h2", "before": "…", "after": "…" } ] } ],
-  "overall_note": "the rest is fine" }
+      "marks": [
+        {
+          "number": 1,
+          "tool": "ellipse",
+          "note": "head smaller",
+          "box": { "x": 0.3, "y": 0.05, "w": 0.4, "h": 0.17 },
+          "crop": "/…/crops/card_mark_01.png"
+        }
+      ]
+    },
+    {
+      "kind": "media",
+      "name": "statement.pdf, page 2",
+      "source": "/abs/statement.pdf",
+      "document": "statement.pdf",
+      "page": 2,
+      "pages": 3,
+      "overview": "/…/overview_d2_statement_p02.png",
+      "marks": [
+        {
+          "number": 2,
+          "tool": "text",
+          "note": "this total is wrong",
+          "quote": "1.234,56 EUR",
+          "anchor": { "prefix": "Interest ", "suffix": " for the period" },
+          "rects": [{ "x": 0.19, "y": 0.22, "w": 0.09, "h": 0.02 }],
+          "box": { "x": 0.19, "y": 0.22, "w": 0.09, "h": 0.02 },
+          "crop": "/…/crops/d2_statement_p02_mark_02.png"
+        }
+      ]
+    },
+    {
+      "kind": "text",
+      "name": "draft.md",
+      "source": "/abs/draft.md",
+      "edits_saved": false,
+      "comments": [
+        {
+          "number": 2,
+          "quote": "…",
+          "anchor": { "prefix": "…", "suffix": "…" },
+          "block": "draft#4",
+          "note": "cut this"
+        }
+      ],
+      "edits": [
+        { "block": "draft#2", "label": "h2", "before": "…", "after": "…" }
+      ]
+    }
+  ],
+  "overall_note": "the rest is fine"
+}
 ```
 
 ### Rules for reading it
@@ -81,6 +169,12 @@ Every item lands in one numbered list. Their "2" is your "2", on a picture and i
   nothing. The crop shows you the eyebrow, the kerning, the seam you got wrong. Look at the images if your model can see them. Say so rather than guess from
   coordinates if it cannot.
 - **Open the `overview` first.** It shows what they saw while they wrote the notes.
+- **A page of a PDF carries `document`, `page` and `pages`,** and its `name` is the label the
+  reviewer saw ("statement.pdf, page 2"). `source` is still the PDF itself, so three marked pages of
+  one file give three entries with one `source`. A page of a PowerPoint deck also keeps `slide`.
+- **A mark with `"tool": "text"` is a selection, not a drawing.** It carries the exact `quote`, its
+  `anchor` and one rectangle per line in `rects`, with `box` as their union. Use the quote to find
+  the words in the source the PDF was made from, and read the crop to see them in place.
 - **`source` is the original file.** Edit that file. The copy in the session directory is a working
   copy, and a rewrite of it changes nothing.
 - **`edits_saved` is always false.** This tool never writes to their files. Apply `after`
@@ -122,8 +216,20 @@ the most expensive input in the loop. Do not spend it on a defect a tool can fin
 
 - **Python 3.9 or newer, standard library only.** No pip, no npm, no Node. It works offline.
 - The browser renders the marked-up overview and cuts the crops, so the tool needs no image library.
-- The tool renders a PDF to page images with `pdftoppm` (poppler), or with `sips` on macOS. `sips`
-  handles the first page only. Without either program, the tool skips PDFs and prints a message.
+- **One vendored dependency, and only in the browser: PDF.js 6.3.289** (Apache-2.0), in
+  [`assets/vendor/pdfjs`](assets/vendor/pdfjs/). Pinned, checksummed in `SHA256SUMS`, verified by
+  `selftest`, served from `127.0.0.1`, never fetched. The upstream URL, what is deliberately left
+  out, and the update procedure are in its [README](assets/vendor/pdfjs/README.md). No renderer has
+  to be installed any more: poppler and `sips` are gone.
+- **What the vendored subset cannot draw.** A scan compressed with JPEG 2000 or JBIG2 needs decoders
+  that are shipped as wasm, which this repository does not carry, so such a page comes up blank. A
+  CJK PDF without embedded fonts can show empty glyphs. A PDF that names Helvetica, Times or Courier
+  without embedding them is drawn with the machine's own fonts, as every other viewer does.
+- **The page is locked down, and that is visible in one place.** The server sends
+  `default-src 'none'` with a fresh nonce for its two scripts, so a reviewed HTML draft can no longer
+  run an `onclick=` handler or a `javascript:` link, and `img-src 'self'` means a **remote image
+  inside a reviewed draft does not load**. Inline it, or review a screenshot, if you need to see it.
+- A PowerPoint deck still needs LibreOffice (`soffice`) to become a PDF first.
 - The Markdown renderer is a deliberate **subset**: headings, lists, quotes, code, tables, links,
   emphasis. Anything else stays a paragraph, and nothing disappears. Full CommonMark needs a
   dependency, and a draft review does not need it.
@@ -142,6 +248,10 @@ the most expensive input in the loop. Do not spend it on a defect a tool can fin
 - Sessions live in `~/.claude/.review/<id>/`. Delete the directory to discard one.
 
 ## Credit
+
+PDF pages are drawn and made selectable by [PDF.js](https://github.com/mozilla/pdf.js) (Apache-2.0),
+vendored unmodified. The page carries about twenty lines of its `web/pdf_viewer.css`, marked as such
+in [`assets/review.html`](assets/review.html), because its text layer needs them.
 
 Two ideas come from [human-review](https://github.com/petergyang/human-review) by Peter Yang (MIT).
 The first anchors a selection by prefix, quote and suffix rather than by offset. The second reports
