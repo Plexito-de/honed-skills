@@ -99,6 +99,58 @@ def card_example(out: Path) -> None:
         print(qr.make_text(CARD_URL, out, logo=logo, caption=CARD_CAPTION, color=CARD_COLOR))
 
 
+def cutout_example(out: Path) -> None:
+    """A card whose logo was pasted straight onto the code, and the logo lifted back out of it."""
+    with tempfile.TemporaryDirectory() as tmp:
+        work = Path(tmp)
+        code = work / "code.png"
+        qr.make_text(CARD_URL, code)
+        with Image.open(code) as base:
+            welded = base.convert("RGBA")
+        patch = Image.new("RGBA", welded.size, (0, 0, 0, 0))
+        span, mid = 2.5 * qr.CARD_PPM, welded.width / 2
+        ImageDraw.Draw(patch).ellipse(
+            (mid - span, mid - span, mid + span, mid + span),
+            fill=(214, 69, 65, 255),
+            outline=INK,
+            width=8,
+        )
+        pasted = work / "pasted.png"
+        Image.alpha_composite(welded, patch).convert("RGB").save(pasted)
+        lifted = work / "lifted.png"
+        qr.cutout(pasted, lifted, None, qr.CUTOUT_MODULES)
+        with Image.open(pasted) as a, Image.open(lifted) as b:
+            source, mark = a.convert("RGB").resize((420, 420), Image.LANCZOS), b.convert("RGBA")
+
+    sheet = Image.new("RGB", (1000, 540), PAPER)
+    sheet.paste(source, (40, 60))
+    # A checker behind the lifted mark, so its transparent background reads as transparent.
+    board = Image.new("RGB", (420, 420), PAPER)
+    for row in range(0, 420, 20):
+        for col in range(0, 420, 20):
+            if (row + col) // 20 % 2:
+                ImageDraw.Draw(board).rectangle(
+                    (col, row, col + 19, row + 19), fill=(232, 232, 236)
+                )
+    fitted = mark.copy()
+    fitted.thumbnail((300, 300), Image.LANCZOS)
+    board.paste(fitted, ((420 - fitted.width) // 2, (420 - fitted.height) // 2), fitted)
+    sheet.paste(board, (540, 60))
+    draw = ImageDraw.Draw(sheet)
+    label, small = qr.find_font(26), qr.find_font(18)
+    draw.text((40, 24), "a card, logo pasted onto the code", font=label, fill=MUTED)
+    draw.text((540, 24), "lifted: the mark, and what was welded to it", font=label, fill=MUTED)
+    draw.text((482, 250), "->", font=label, fill=INK, anchor="mm")
+    draw.text(
+        (40, 500),
+        "This logo was pasted onto the code, so parting them leaves a module behind. Over a "
+        "cleared zone the lift is exact. Nothing here is real: the script draws it all.",
+        font=small,
+        fill=MUTED,
+    )
+    sheet.save(out, optimize=True)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--out-dir", type=Path, default=Path.cwd())
@@ -108,6 +160,9 @@ def main() -> int:
     epc_example(epc)
     print(epc)
     card_example(args.out_dir / "qr-code-card-example.png")
+    lift = args.out_dir / "qr-code-cutout-example.png"
+    cutout_example(lift)
+    print(lift)
     return 0
 
 

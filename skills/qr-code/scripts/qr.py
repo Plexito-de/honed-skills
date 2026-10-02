@@ -115,6 +115,15 @@ PROOF_COMBINED_PPM = 2.5
 # programs (EPS starts Ghostscript). So every image this script reads is limited to these formats.
 LOGO_FORMATS = ("PNG", "JPEG", "WEBP", "GIF", "BMP")
 LOGO_FORMAT_LIST = ", ".join(LOGO_FORMATS)
+# cutout. The crop is a centered square of this many modules when no --box is given: wide enough
+# to hold the mark and a ring of ordinary modules, which the erosion then drops.
+CUTOUT_MODULES = 13
+# Labelling runs in Python, one pass per pixel, so a crop larger than this is refused rather than
+# left to run for minutes. A 13-module crop at 20 px per module is 68,000 pixels.
+MAX_CUTOUT_PIXELS = 1_000_000
+# How far a pixel must sit from the sampled background before it counts as part of the mark.
+# A screenshot is often JPEG, so the background is never exactly one value.
+CUTOUT_THRESHOLD = 40
 READ_FORMATS = ("PNG", "JPEG", "WEBP", "GIF", "BMP")
 MAX_PIXELS = 25_000_000  # a logo or a received code larger than this is refused before decoding
 BUG_HINT = (
@@ -705,6 +714,214 @@ def make_text(
     )
 
 
+def components(bits: bytearray, w: int, h: int) -> list[list[int]]:
+    """Every 4-connected run of set pixels, as lists of indices. One pass, no dependency."""
+    seen = bytearray(len(bits))
+    found = []
+    for start in range(len(bits)):
+        if not bits[start] or seen[start]:
+            continue
+        seen[start] = 1
+        group, queue = [start], [start]
+        while queue:
+            i = queue.pop()
+            x, y = i % w, i // w
+            for j in (
+                (i - 1) if x else -1,
+                (i + 1) if x + 1 < w else -1,
+                (i - w) if y else -1,
+                (i + w) if y + 1 < h else -1,
+            ):
+                if j >= 0 and bits[j] and not seen[j]:
+                    seen[j] = 1
+                    group.append(j)
+                    queue.append(j)
+        found.append(group)
+    return found
+
+
+def touches_edge(group: list[int], w: int, h: int, inset: int = 0) -> bool:
+    """Reaches the frame of the image, or the frame `inset` pixels inside it."""
+    return any(i % w in (inset, w - 1 - inset) or i // w in (inset, h - 1 - inset) for i in group)
+
+
+def fill_holes(bits: bytearray, w: int, h: int) -> bytearray:
+    """Set every unset run that the border cannot reach: the inside of a ring-shaped mark."""
+    filled = bytearray(bits)
+    inverse = bytearray(1 - b for b in bits)
+    for group in components(inverse, w, h):
+        if not touches_edge(group, w, h):
+            for i in group:
+                filled[i] = 1
+    return filled
+
+
+def grow(bits: bytearray, w: int, h: int, size: int, widen: bool) -> bytearray:
+    """One erosion or dilation, through Pillow, because a pixel loop in Python is too slow."""
+    from PIL import ImageFilter
+
+    _, _, Image = libraries()
+    image = Image.frombytes("L", (w, h), bytes(255 if b else 0 for b in bits))
+    kernel = ImageFilter.MaxFilter(size) if widen else ImageFilter.MinFilter(size)
+    return bytearray(1 if v else 0 for v in image.filter(kernel).tobytes())
+
+
+def paper_color(crop) -> tuple[int, int, int]:
+    """The paper a code is printed on: the bright end, never the median.
+
+    Most of a crop of a QR code is dark module, so a median would pick the ink and every later
+    step would run on an inverted mask.
+    """
+    bright = sorted(crop.convert("RGB").getdata(), key=lambda p: p[0] * 2 + p[1] * 5 + p[2])
+    return bright[int(len(bright) * 0.9)]
+
+
+def middle_group(groups: list[list[int]], w: int, h: int) -> list[int] | None:
+    """The part in the MIDDLE, which is the only place a code can spare for a mark.
+
+    Never the biggest part: the code around a mark is one large connected mass, and anything
+    else in the crop, a caption band for instance, can outweigh the mark itself.
+    """
+    mid_x, mid_y, reach = w / 2, h / 2, min(w, h) * 0.25
+    center = int(mid_y) * w + int(mid_x)
+    scored = []
+    for group in groups:
+        if center in group:
+            return group
+        near = sum(1 for i in group if abs(i % w - mid_x) < reach and abs(i // w - mid_y) < reach)
+        if near:
+            scored.append((near, group))
+    return max(scored, key=lambda s: s[0])[1] if scored else None
+
+
+def cut_logo(crop, module_px: float):
+    """The mark inside a crop, with the QR modules around it removed. Returns a mask and the crop."""
+    crop = crop.convert("RGB")
+    back = paper_color(crop)
+    w, h = crop.size
+    mark = bytearray(
+        1 if max(abs(p[k] - back[k]) for k in range(3)) > CUTOUT_THRESHOLD else 0
+        for p in crop.getdata()
+    )
+    # The holes are filled at the END, over the chosen mark alone. Filling them here would close
+    # every white gap the code encloses between its own modules and weld the crop into one mass.
+    mid_x, mid_y, reach = w / 2, h / 2, min(w, h) * 0.25
+    worn, steps = mark, 0
+    groups = components(worn, w, h)
+    heart = middle_group(groups, w, h)
+    if heart is None:
+        raise Refused("cutout: the middle of the crop is empty. Widen it, or give --box.")
+    if touches_edge(heart, w, h):
+        # The mark runs into the code, so there was no cleared zone under it. Open the mask by
+        # more than a module: that erases every one-module line and leaves the solid mark. It
+        # also rounds fine detail away, which is the price of a logo welded to the code.
+        steps = max(1, round(module_px * 0.7))
+        for _ in range(steps):
+            worn = grow(worn, w, h, 3, widen=False)
+        groups = components(worn, w, h)
+        heart = middle_group(groups, w, h)
+        if heart is None or touches_edge(heart, w, h):
+            raise Refused(
+                "cutout: the mark in the middle still reaches the edge of the crop after eroding "
+                "it. The crop is too tight, or there is no mark. Widen --box."
+            )
+    # A logo sits in the middle, because the middle is the only place a code can spare. So keep
+    # the parts near the center (a symbol and its lettering are two parts) and drop the rest.
+    floor = max(4.0, (0.75 * module_px) ** 2)
+    kept, chosen = bytearray(len(worn)), [heart]  # the part in the middle is the mark, always
+    for group in groups:
+        if group is heart or len(group) < floor or touches_edge(group, w, h):
+            continue
+        near = sum(1 for i in group if abs(i % w - mid_x) < reach and abs(i // w - mid_y) < reach)
+        if near >= len(group) * 0.5:  # a symbol and its lettering are two parts, both centered
+            chosen.append(group)
+    for group in chosen:
+        for i in group:
+            kept[i] = 1
+    spread = [i for group in chosen for i in group]
+    across = (
+        0
+        if not spread
+        else min(
+            max(i % w for i in spread) - min(i % w for i in spread),
+            max(i // w for i in spread) - min(i // w for i in spread),
+        )
+    )
+    # Measured before the erosion, so the two branches share one threshold. Four modules is the
+    # floor because a code is full of three-module clusters of its own, and a mark that small
+    # would be unreadable on a printed card anyway.
+    if across + 2 * steps < 4 * module_px:
+        raise Refused(
+            "cutout: the middle of the crop holds nothing wider than four code modules, so there "
+            "is no mark to lift. Check that the picture shows a code with a logo in it."
+        )
+    # Eroding then dilating by the same amount is an opening, and an opening can never reach
+    # outside the mask it started from, so there is nothing to intersect back against here.
+    for _ in range(steps):
+        kept = grow(kept, w, h, 3, widen=True)
+    # Now that only the mark is left, close what it encloses: the white inside a ring or a letter.
+    return fill_holes(kept, w, h), crop
+
+
+def cutout(source: Path, out: Path, box: tuple[int, int, int, int] | None, modules: int) -> str:
+    """Lift the mark out of the middle of a QR code in a screenshot, as a transparent PNG."""
+    _, _, Image = libraries()
+    out = Path(os.path.abspath(out))
+    shown = printable(str(out))
+    if out.suffix.lower() != ".png":
+        raise Refused(f"out: {shown} does not end in .png, and the file is always a PNG")
+    if out.is_symlink() or out.is_dir():
+        raise Refused(f"out: {shown} is a folder or a symbolic link. Name the PNG file to write.")
+    with open_image(source, READ_FORMATS) as image:
+        picture = image.convert("RGB")
+    if box is None:
+        box, module_px = centered_box(picture, modules)
+    else:
+        left, top, right, bottom = box
+        if right - left < 8 or bottom - top < 8:
+            raise Refused("box: fewer than 8 pixels wide or tall")
+        module_px = max(2.0, (right - left) / modules)
+    left, top, right, bottom = box
+    if (right - left) * (bottom - top) > MAX_CUTOUT_PIXELS:
+        raise Refused(
+            f"box: {(right - left) * (bottom - top)} pixels, the limit is {MAX_CUTOUT_PIXELS}. "
+            "Crop closer to the mark."
+        )
+    mask, flat = cut_logo(picture.crop(box), module_px)
+    w, h = flat.size
+    cut = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    stencil = Image.frombytes("L", (w, h), bytes(255 if b else 0 for b in mask))
+    cut.paste(flat.convert("RGBA"), (0, 0), stencil)
+    edges = cut.getbbox()
+    if edges is None:
+        raise Refused("cutout: nothing is left after the mask. Widen --box.")
+    cut = cut.crop(edges)
+    cut.save(out, dpi=(300, 300))
+    opaque = sum(1 for b in mask if b)
+    return f"CUT {shown} {cut.width}x{cut.height} from {opaque} pixels of mark"
+
+
+def centered_box(picture, modules: int) -> tuple[tuple[int, int, int, int], float]:
+    """Find the QR code in the picture, then a centered square of this many modules."""
+    raw, _, version = read_image(picture, "the picture")
+    del raw
+    found = [b for b in libraries()[1].read_barcodes(picture)]
+    spot = found[0].position
+    xs = [spot.top_left.x, spot.top_right.x, spot.bottom_right.x, spot.bottom_left.x]
+    ys = [spot.top_left.y, spot.top_right.y, spot.bottom_right.y, spot.bottom_left.y]
+    across = 17 + 4 * version
+    module_px = (max(xs) - min(xs) + max(ys) - min(ys)) / (2 * across)
+    if module_px < 2:
+        raise Refused(
+            f"the code is {module_px:.1f} pixels per module, too small to cut a mark out of. "
+            "Use a larger picture."
+        )
+    half = modules * module_px / 2
+    mid_x, mid_y = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
+    box = (round(mid_x - half), round(mid_y - half), round(mid_x + half), round(mid_y + half))
+    return box, module_px
+
+
 def split_payload(raw: bytes) -> list[str]:
     """Decode by the character set the payload names, and split on LF or CRLF."""
     head = raw.split(b"\n", 3)
@@ -809,6 +1026,13 @@ def main(argv: list[str] | None = None) -> int:
     build.add_argument("--out", required=True, type=Path, help="the PNG to write")
     read = sub.add_parser("epc-verify", help="decode an EPC payment code and check every element")
     read.add_argument("png", type=Path)
+    cut = sub.add_parser("cutout", help="lift the logo out of a picture of a card, as a PNG")
+    cut.add_argument("--in", dest="source", required=True, type=Path, help="the picture to read")
+    cut.add_argument("--out", required=True, type=Path, help="the transparent PNG to write")
+    cut.add_argument("--box", help="left,top,right,bottom in pixels (the default finds the code)")
+    cut.add_argument(
+        "--modules", type=int, default=CUTOUT_MODULES, help="crop width in code modules"
+    )
     args = parser.parse_args(argv)
     try:
         if args.selftest:
@@ -839,6 +1063,27 @@ def main(argv: list[str] | None = None) -> int:
             )
             show(payload.split("\n"))
             print(make(payload, args.out))
+            return EXIT_OK
+        if args.command == "cutout":
+            if not args.source.is_file():
+                print(f"usage: {printable(str(args.source))} is not a file", file=sys.stderr)
+                return EXIT_USAGE
+            edges = None
+            if args.box:
+                parts = args.box.split(",")
+                if len(parts) != 4 or not all(p.strip().lstrip("-").isdigit() for p in parts):
+                    print("usage: --box takes left,top,right,bottom in pixels", file=sys.stderr)
+                    return EXIT_USAGE
+                edges = tuple(int(p) for p in parts)
+                if edges[0] >= edges[2] or edges[1] >= edges[3]:
+                    print(
+                        "usage: --box left must be under right, top under bottom", file=sys.stderr
+                    )
+                    return EXIT_USAGE
+            if args.modules < 3:
+                print("usage: --modules is 3 or more", file=sys.stderr)
+                return EXIT_USAGE
+            print(cutout(args.source, args.out, edges, args.modules))
             return EXIT_OK
         if args.command == "epc-verify":
             if not args.png.is_file():
@@ -1288,6 +1533,147 @@ def selftest() -> int:
                     "zoned.png",
                 ]
             ),
+        )
+
+    # cutout. The round trip is the real check: draw a logo, build a card, lift the logo back out.
+    with tempfile.TemporaryDirectory() as tmp:
+        folder = Path(tmp)
+        from PIL import ImageDraw
+
+        ring = bytearray(
+            [0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 1, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0]
+        )
+        check("fill_holes closes a ring", sum(fill_holes(ring, 5, 5)) == 9)
+        check("components counts two marks", len(components(bytearray([1, 0, 1, 0]), 4, 1)) == 2)
+        check(
+            "touches_edge sees the border", touches_edge([0], 5, 5) and not touches_edge([12], 5, 5)
+        )
+
+        link = "https://example.com/menu"
+        mark = folder / "mark.png"
+        drawn = Image.new("RGBA", (300, 300), (0, 0, 0, 0))
+        pen = ImageDraw.Draw(drawn)
+        pen.ellipse(
+            (10, 10, 289, 289), fill=(214, 69, 65, 255), outline=(20, 20, 20, 255), width=12
+        )
+        pen.rectangle((120, 120, 180, 180), fill=(255, 255, 255, 255))
+        for angle in range(0, 360, 45):  # thin spokes: an opening this logo does not need eats them
+            far = math.radians(angle)
+            pen.line(
+                (150, 150, 150 + 145 * math.cos(far), 150 + 145 * math.sin(far)),
+                fill=(20, 20, 20, 255),
+                width=5,
+            )
+        drawn.save(mark)
+        dark = Image.new("RGB", (10, 10), (20, 20, 20))  # 84 % ink, as a crop of a code can be
+        dark.paste(Image.new("RGB", (4, 4), (250, 250, 250)), (0, 0))
+        check("the paper is read from the bright end", min(paper_color(dark)) > 200)
+        # Three shapes on paper: a mark, its wordmark under it, and a blot off in the corner.
+        # The first two are the logo, the third is whatever else the crop caught.
+        sheet = Image.new("RGB", (200, 200), (255, 255, 255))
+        ink = ImageDraw.Draw(sheet)
+        ink.ellipse((70, 60, 130, 120), fill=(0, 0, 0))
+        ink.rectangle((80, 128, 120, 140), fill=(0, 0, 0))
+        ink.rectangle((2, 2, 40, 40), fill=(0, 0, 0))
+        ink.rectangle((138, 98, 142, 102), fill=(0, 0, 0))  # a speck, smaller than a module
+        picked, _ = cut_logo(sheet, 10)
+        check("the wordmark under a mark is kept", picked[134 * 200 + 100] == 1)
+        check("a shape off in the corner is dropped", picked[20 * 200 + 20] == 0)
+        check("a speck smaller than a module is dropped", picked[100 * 200 + 140] == 0)
+        # A big part off to one side, a small one in the middle: the mark is the one in the middle.
+        wide = [y * 9 + x for y in range(9) for x in range(3)]
+        middling = [4 * 9 + 4, 4 * 9 + 5]
+        check(
+            "the mark is the part in the middle, not the biggest",
+            middle_group([wide, middling], 9, 9) is middling,
+        )
+        card = folder / "card.png"
+        make_text(link, card, logo=mark, caption="Hi", color="#1F7A8C")
+        lifted = folder / "lifted.png"
+        line = cutout(card, lifted, None, CUTOUT_MODULES)
+        check(
+            "cutout reports the file it wrote", line.startswith(f"CUT {os.path.abspath(lifted)} ")
+        )
+        with Image.open(lifted) as got, Image.open(mark) as want:
+            # The drawn logo is shrunk into the zone and cropped tight, so compare SHAPES: both
+            # alpha masks at one size, overlap over union. A fill ratio only compares boxes.
+            got = got.convert("RGBA")
+            shape = want.convert("RGBA")
+            shape = shape.crop(shape.getbbox()).resize(got.size, Image.NEAREST)
+            pair = list(zip([p[3] > 0 for p in got.getdata()], [p[3] > 0 for p in shape.getdata()]))
+            overlap = sum(1 for x, y in pair if x and y) / sum(1 for x, y in pair if x or y)
+            # High on purpose: at 0.94 the thin spokes or the hole in the middle are already gone.
+            check("the lifted mark has the shape of the original", overlap > 0.96)
+            check("the lifted mark is square to within a module", abs(got.width - got.height) <= 20)
+            check("the lifted mark is not the whole crop", got.width < 13 * CARD_PPM - 20)
+        again = folder / "again.png"
+        check(
+            "a lifted mark builds a card that verifies",
+            make_text(link, again, logo=lifted).endswith("-H"),
+        )
+        plain_code = folder / "plain-code.png"
+        make_text(link, plain_code)
+        # The real case: a logo pasted straight onto a code, with no cleared zone under it, so
+        # the mark and the modules are one shape. Opening the mask has to pull them apart again.
+        with Image.open(plain_code) as base:
+            welded = base.convert("RGBA")
+        disc = Image.new("RGBA", welded.size, (0, 0, 0, 0))
+        span, mid = 2.5 * CARD_PPM, welded.width / 2
+        ImageDraw.Draw(disc).ellipse(
+            (mid - span, mid - span, mid + span, mid + span),
+            fill=(214, 69, 65, 255),
+            outline=(20, 20, 20, 255),
+            width=8,
+        )
+        fused = folder / "fused.png"
+        Image.alpha_composite(welded, disc).convert("RGB").save(fused)
+        check("a pasted logo still lets the code decode", decode(fused)[0] == link.encode("utf-8"))
+        fused_cut = folder / "fused-cut.png"
+        cutout(fused, fused_cut, None, CUTOUT_MODULES)
+        with Image.open(fused_cut) as got:
+            got = got.convert("RGBA")
+            opaque = sum(1 for p in got.convert("RGBA").getdata() if p[3] > 0)
+            # A welded mark keeps any module thick enough to survive the opening, so the test
+            # asks for the disc back, with bleed allowed, not for the disc and nothing else.
+            disc_area = math.pi * span**2
+            check("a welded mark comes back about its own size", 0.8 < opaque / disc_area < 2.5)
+            # The crop is 13 modules and the disc is 5, so 9 catches a result that kept the code.
+            check("a welded mark is far smaller than the crop", max(got.size) < 9 * CARD_PPM)
+        big = folder / "big.png"
+        Image.new("RGB", (4000, 4000), "white").save(big)
+        for label, call in (
+            (
+                "cutout refuses a code with no mark",
+                lambda: cutout(plain_code, folder / "x.png", None, CUTOUT_MODULES),
+            ),
+            (
+                "cutout refuses a box that is too small",
+                lambda: cutout(card, folder / "x.png", (10, 10, 14, 14), CUTOUT_MODULES),
+            ),
+            (
+                "cutout refuses an output that is a folder",
+                lambda: cutout(card, folder, None, CUTOUT_MODULES),
+            ),
+            (
+                "cutout refuses an output that is not .png",
+                lambda: cutout(card, folder / "x.jpg", None, CUTOUT_MODULES),
+            ),
+            (
+                "cutout refuses a picture with no code",
+                lambda: cutout(big, folder / "x.png", None, CUTOUT_MODULES),
+            ),
+        ):
+            try:
+                call()
+            except (Refused, ProofFailed):
+                check(label, True)
+            else:
+                check(label, False)
+        check("a refused cutout leaves no file", not (folder / "x.png").exists())
+        check(
+            "cutout names the pixel limit it refused on",
+            "the limit is"
+            in refusal(lambda: cutout(card, folder / "x.png", (0, 0, 1100, 1100), CUTOUT_MODULES)),
         )
 
     for label in failed:

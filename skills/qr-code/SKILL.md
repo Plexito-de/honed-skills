@@ -1,12 +1,12 @@
 ---
 name: qr-code
-description: Use when a QR code has to be made or checked and must scan correctly, such as a SEPA payment code (EPC QR code, GiroCode, Überweisung per QR-Code, EPC069-12) for an invoice, or a QR code for a URL, a donation or payment link, a printed card or poster, with or without a logo in the middle and a caption below. Refuses input a scanner would read differently (an IBAN that fails its checksum, a name over 70 characters, hidden characters, a word that mixes Latin and Cyrillic letters, data too long to fit beside a logo) and proves that the finished image decodes to exactly the input. A card is also decoded at phone-camera size and slightly out of focus. Not for WiFi, vCard or calendar codes, or SVG and PDF output.
+description: Use when a QR code has to be made or checked and must scan correctly, such as a SEPA payment code (EPC QR code, GiroCode, Überweisung per QR-Code, EPC069-12) for an invoice, or a QR code for a URL, a donation or payment link, a printed card or poster, with or without a logo in the middle and a caption below. Refuses input a scanner would read differently (an IBAN that fails its checksum, a name over 70 characters, hidden characters, a word that mixes Latin and Cyrillic letters, data too long to fit beside a logo) and proves that the finished image decodes to exactly the input. A card is also decoded at phone-camera size and slightly out of focus. Also lifts the logo back out of a picture of an old card, when that picture is the only copy left. Not for WiFi, vCard or calendar codes, or SVG and PDF output.
 license: Apache-2.0
 compatibility: Requires Python 3.10+ with segno 1.6.6, zxing-cpp 3.1.1 and Pillow 12.3.0 in a virtual environment. No network, no account. Agent-agnostic.
 metadata:
-  version: "1.0.0"
-  changeSummary: First publication.
-  isBreaking: false
+  version: "1.1.0"
+  changeSummary: Adds `cutout`, which lifts the logo out of a picture of a card and writes it as a transparent PNG, so an old card can be rebuilt when the logo file is lost. Also quotes isBreaking, because the Agent Skills spec types metadata values as strings. The text and epc modes are unchanged.
+  isBreaking: "false"
 ---
 
 # QR code: payment codes and printable cards, proven from the file
@@ -16,13 +16,15 @@ does not scan at the door. A payment code with one wrong IBAN digit sends the mo
 So this skill does not trust the encoder. It writes the image, decodes the finished file with an
 independent decoder, compares the bytes, and only then moves the file into place.
 
-It has two modes:
+It has two modes and one helper:
 
 - **`text`**: any one line of text, usually a URL. Optionally a logo in the center, a colored card
   and a caption. The card is also decoded after it is shrunk and blurred, as a phone camera sees it.
 - **`epc`**: one SEPA credit transfer as an EPC QR code, under the European Payments Council
   guideline EPC069-12. German banks call it GiroCode. Every element that a bank would read
   differently is refused.
+- **`cutout`**: the way back. It lifts the logo out of a picture of a card and writes it as a
+  transparent PNG, for when the card has to be rebuilt and the logo file is gone.
 
 ![A teal card with a QR code for https://example.com/menu on a white panel, a red disc logo with a white star in a cleared square in its center, and the caption "Scan for today's menu" below](../../docs/assets/qr-code-card-example.png)
 
@@ -154,6 +156,41 @@ The text itself is checked before it is encoded:
 Non-ASCII text is encoded as UTF-8 without an ECI marker. Most phone scanners read that as UTF-8, and
 some read it as Latin-1. For a URL, use its ASCII form: the punycode host and percent-encoded path.
 
+## Lift a logo out of an old card
+
+The card has to be reprinted, the only copy of the logo is a photograph or a screenshot of the old
+card, and cropping it by hand brings the code's own modules with it.
+
+```bash
+.venv-qr/bin/python scripts/qr.py cutout --in old-card.png --out logo.png
+```
+
+![Left, a QR code with a red disc pasted over its middle. Right, the disc lifted out onto a checkerboard, with a black bar of code still attached on each side, showing what a pasted logo costs](../../docs/assets/qr-code-cutout-example.png)
+
+It writes `logo.png` with a transparent background, ready for `text --logo`. No box is needed: the
+code in the picture is decoded, which gives its corners and so its module size, and the crop is a
+centered square of 13 modules. Give `--box left,top,right,bottom` in pixels when the picture holds
+no readable code, or when the mark sits outside that square. `--modules` changes the default width.
+
+How it separates the mark from the code, and why each step is there:
+
+1. **The paper is read from the bright end of the crop, never the median.** Most of a crop of a QR
+   code is ink, so a median would pick black and every later step would run inverted.
+2. **Everything far enough from the paper colour is the mark.** A screenshot is usually JPEG, so no
+   two white pixels are equal.
+3. **If the mark in the middle already stands free, nothing is eroded.** That is the case when the
+   old card had a cleared zone, and it keeps fine detail exactly.
+4. **Otherwise the mask is opened by 0.7 of a module.** That erases every one-module line and
+   leaves the solid mark. It is the only way to part two shapes that print as one, and it costs
+   the fine detail.
+5. **The part in the middle is the mark**, never the biggest part: the code around it is one large
+   connected mass. Parts near the middle join it, so a symbol keeps the wordmark under it. A speck
+   smaller than a module, or a shape off at the edge, is dropped.
+6. **Nothing wider than four modules in the middle means no mark**, and the command refuses. A code
+   is full of three-module clusters of its own.
+7. **What the mark encloses is filled in** at the end, so the white inside a ring or a letter stays
+   white instead of turning transparent.
+
 ## EPC mode: a SEPA payment code (GiroCode)
 
 An EPC QR code carries one SEPA credit transfer: payee, IBAN, amount and reference. A banking app scans
@@ -247,8 +284,13 @@ so the comparison with the plain text is the only one.
 - **Scan the printed card once with a real phone before you print a batch.** The proof uses one
   decoder, zxing-cpp. It covers size and blur. It does not cover other phone readers, glossy paper,
   a curved surface, or a printer that bleeds.
-- **The logo comes as its own image file.** A logo cut from a screenshot of an old card carries the
-  QR modules around it. Clean it in an image editor first.
+- **`cutout` lifts a mark, not fine print.** Where the old card had a cleared zone under the logo,
+  the lift is exact. Where the logo was pasted straight onto the code, the two are one shape, and
+  separating them rounds off any detail thinner than a module and can bring a neighbouring module
+  with it. Look at the result before you use it.
+- **A wider crop is not a better crop.** The default of 13 modules is the tested one. Measured on a
+  version-3 card: at 13 modules the lift came back at the size of the mark, at 21 and 25 it kept
+  code with it. Widen only when the mark does not fit, and then check the result.
 - **Images are read only as PNG, JPEG, WebP, GIF or BMP, up to 25 million pixels.** Pillow picks a
   decoder from the file header, not the name, and some decoders start external programs.
 - A French IBAN can belong to a territory outside the EEA, such as Saint-Pierre-et-Miquelon. Its
