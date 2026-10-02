@@ -4,9 +4,9 @@ description: Use when filling an official PDF form to print, sign or submit, and
 license: Apache-2.0
 compatibility: Requires Python 3.9+ with pypdf, reportlab and pdfplumber, plus qpdf and poppler's pdftoppm on PATH. Agent-agnostic, no product-specific tooling.
 metadata:
-  version: "1.2.0"
-  changeSummary: Added the frontmatter changelog fields. The method, the scripts and the illustration are unchanged.
-  isBreaking: false
+  version: "1.2.1"
+  changeSummary: Frontmatter only. metadata values are strings under the Agent Skills spec, so isBreaking is now "false" rather than a YAML boolean. The skill itself is unchanged.
+  isBreaking: "false"
 ---
 
 # Comb-box PDF form filling

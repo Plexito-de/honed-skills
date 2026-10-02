@@ -4,9 +4,9 @@ description: Use when a device's display was filmed and every value on it has to
 license: Apache-2.0
 compatibility: Requires Python 3.9+ with Pillow 10.1+, and ffmpeg on PATH. ffprobe is used when present, to catch a start time past the end of the clip before ffmpeg is called. The selftest additionally needs an ffmpeg with libx264, because it builds its own fixtures; the skill itself does not. No numpy, no OpenCV, no OCR engine, no network access. Agent-agnostic; the reading itself is done by whatever model runs the skill.
 metadata:
-  version: "1.0.0"
-  changeSummary: First release. Extraction at the camera's own rate, a panel detector and sharpness score that a dark or blown-out frame cannot win, labelled contact sheets, and a coverage report that names every window it could not read.
-  isBreaking: false
+  version: "1.0.1"
+  changeSummary: Frontmatter only. metadata values are strings under the Agent Skills spec, so isBreaking is now "false" rather than a YAML boolean. The skill itself is unchanged.
+  isBreaking: "false"
 ---
 
 # Video to readings
