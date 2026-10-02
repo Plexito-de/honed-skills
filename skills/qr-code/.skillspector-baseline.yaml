@@ -1,0 +1,30 @@
+# Accepted findings for the qr-code skill, with the reason for each.
+#
+# Written by hand, not by `skillspector baseline`, because a fingerprint baseline pins line numbers
+# and says nothing about why. Every entry is a decision, and the reason is the point.
+#
+# SkillSpector does not apply a baseline a skill ships unless you pass --use-shipped-baseline, and
+# that default is right: an author's baseline can hide findings from you. So this file does not
+# change the number you see when you scan this folder. It shows what we decided, so you can
+# disagree with it.
+#
+# Scanned with SkillSpector v2.11.1, static analysis only. Result: 7/100, LOW, CAUTION.
+version: 2
+
+rules:
+  - id: "LP3"
+    path: "SKILL.md"
+    reason: >-
+      No allowed-tools declaration, on purpose. A skill that declares its own tool scope
+      pre-approves those tools inside your agent, which removes your permission decision instead of
+      informing it, so this repository forbids the field. Rejected alternative: adding it to please
+      the scanner, which trades your control for seven points of score. LP3 fires only because the
+      skill ships scripts.
+
+# NOT baselined, so the absence is not read as an oversight:
+#
+# Coverage reads "partial", which caps the recommendation at CAUTION. The cause is the two picture
+# links in SKILL.md, which point to ../../docs/assets/ on purpose: a binary inside this folder is a
+# HIGH finding for a scanner that cannot read it. The pictures render in the repository and the
+# folder stays text-only. A coverage finding is not suppressed, because that would hide the fact
+# that part of the artifact was not analysed.

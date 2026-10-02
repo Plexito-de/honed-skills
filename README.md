@@ -13,6 +13,7 @@ The Agent Skills format is an open, cross-agent spec, so nothing here is tied to
 | [`drive-audit`](skills/drive-audit/) | Something in Google Drive is shared and you cannot tell what. Exposure in Drive lives on the ITEM, so a folder can report itself private while every file inside it is world-readable, and Drive has no view that shows you otherwise at any scale. Classifies every non-owner permission worst-first, diffs the result against a policy file where each approved share carries a reason and a date, and revokes or downgrades with a restorable snapshot written before the first deletion. Dry run until `--apply`. The classifier and its 21 offline cases run with no credentials, so you can check the logic before granting it access. |
 | [`excalidraw`](skills/excalidraw/) | A diagram has to be produced as a `.excalidraw` file and look hand-drawn: architecture, flow, sequence, tree, mind map, timeline, network. Writes a short spec and expands it deterministically, with font widths measured in a browser against the real fonts rather than guessed from a multiplier, and a linter that runs before you look. |
 | [`video-to-readings`](skills/video-to-readings/) | Somebody filmed a meter, gauge or appliance while scrolling through its stored values, and every one of them has to come back out. The general video tools fail here for one measurable reason: a camera held on a display is a near-static scene, so scene-change frame selection passes no frame at all and ffmpeg still exits `0`, blaming the wrong parameter. Samples at the rate of the camera, scores sharpness in a way a dark frame cannot win, tiles the sharpest frame per window into labelled contact sheets, and reports every second it could not read, because a series is only useful if you can show nothing was missed. Pillow and ffmpeg, no OCR engine, and a mutation-tested selftest that builds its own fixtures. |
+| [`qr-code`](skills/qr-code/) | A QR code has to scan the first time: a URL on a printed card with a logo in the middle, or an invoice paid through the EPC QR code a banking app reads (GiroCode in Germany). The usual generators paste the logo over live modules, and few read the file back. This one clears the modules behind the logo and sizes that zone in modules. A PNG counts as written only when an independent decoder has read the finished card back to exactly the input, also shrunk to phone-camera size and blurred. For a payment, every rule refuses rather than repairs: an IBAN that fails its checksum, a payee name the script would have to shorten, a hidden character, a word that mixes Latin and Cyrillic letters. segno, zxing-cpp and Pillow, pinned, no network, no account. |
 
 **`human-review`.** One local page holds the card and the draft. Two marks sit on the picture, a third comments on a selected phrase, the retyped headline comes back as a before and after, and the numbered list on the right is what the agent receives:
 
@@ -44,6 +45,13 @@ The dimmed tile is a frame the picker rejects. Every digit below was drawn from 
 geometry by a script that ships with the skill, so nothing real went into it:
 
 ![A three-by-three contact sheet. Each tile shows the same seven-segment panel carrying an index from minus one to minus nine and an invented value between 7.9 and 19.4 kWh, with its own timestamp stamped in yellow on black in the top-left corner. The fifth tile is dimmed, standing for a frame the picker rejects as unreadable.](docs/assets/scrolling-display-contact-sheet.png)
+
+**`qr-code`.** A menu card as `qr.py text` writes it. The star is a logo the illustration script
+draws, and the address is `example.com`. The modules behind the logo are cleared, not covered. The
+file counts as written only when it decodes to exactly the address at full size, shrunk to 3 and
+2 pixels per module, blurred, and blurred and shrunk together:
+
+![A teal card with a QR code for https://example.com/menu on a white panel, a red disc logo with a white star in a cleared square in its center, and the caption "Scan for today's menu" below](docs/assets/qr-code-card-example.png)
 
 ## Install
 
