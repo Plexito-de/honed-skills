@@ -69,6 +69,7 @@ VENDOR = ASSETS / "vendor" / "pdfjs"
 VENDOR_FILES = ("pdf.min.mjs", "pdf.worker.min.mjs")
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 TEXT_SUFFIXES = {".md", ".markdown", ".html", ".htm", ".txt"}
+DRAFT_TOOLS = {"ellipse", "rect", "free", "arrow"}  # the shapes the page can draw on a draft
 CONTENT_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
                  ".gif": "image/gif", ".webp": "image/webp", ".pdf": "application/pdf",
                  ".mjs": "text/javascript; charset=utf-8", ".js": "text/javascript; charset=utf-8",
@@ -419,10 +420,33 @@ def write_outputs(sess: Path, payload: dict) -> dict:
         else:
             comments, edits = [], []
             for c in page.get("comments", []):
-                comments.append({"id": c["id"], "number": c["number"], "quote": c["quote"],
-                                 "anchor": c.get("anchor", {}), "block": c.get("block"),
-                                 "note": c["note"].strip()})
-                lines.append(f"{c['number']}. \"{c['quote'][:70]}\" -> {c['note'].strip() or '[no text]'}")
+                # A selection over several blocks lists them in `blocks`, and its text per block in
+                # `parts`. A circle, box, scribble or arrow drawn on the draft has a `tool`, the words
+                # under it and a `box`, and an EMPTY anchor: a shape has no exact character span, and
+                # a reader that indexes anchor["prefix"] on every comment keeps working. Only values
+                # the page can produce are carried, since an agent reads this file as instructions.
+                blocks = [b for b in (c.get("blocks") or [c.get("block")])
+                          if isinstance(b, str)] or [None]
+                tool = c.get("tool") if c.get("tool") in DRAFT_TOOLS else None
+                comment = {"id": c["id"], "number": c["number"], "quote": c["quote"],
+                           "anchor": {"prefix": "", "suffix": ""} if tool else c.get("anchor", {}),
+                           "block": blocks[0], "note": c["note"].strip()}
+                if tool:
+                    comment["tool"] = tool
+                    if isinstance(c.get("box"), dict):
+                        comment["box"] = c["box"]
+                if len(blocks) > 1:
+                    comment["blocks"] = blocks
+                    parts = c.get("parts")
+                    if isinstance(parts, list) and all(
+                            isinstance(p, dict) and isinstance(p.get("block"), str)
+                            and isinstance(p.get("quote"), str) for p in parts):
+                        comment["parts"] = [{"block": p["block"], "quote": p["quote"]}
+                                            for p in parts]
+                comments.append(comment)
+                how = f"[{tool}] " if tool else ""
+                quote = c["quote"].replace("\n", " / ")[:70]
+                lines.append(f"{c['number']}. {how}\"{quote}\" -> {c['note'].strip() or '[no text]'}")
             for e in page.get("edits", []):
                 edits.append({"block": e.get("block"), "label": e.get("label"),
                               "before": e["before"], "after": e["after"]})
@@ -889,7 +913,8 @@ FIXTURE_PAGES = [
      (72, 700, 12, "Nothing of interest here")],
 ]
 FIXTURE_DRAFT = ("# Fixture draft\n\nA paragraph that says placeholder once and then says "
-                 "placeholder a second time.\n\n## Second heading\n\nMore text.\n")
+                 "placeholder a second time.\n\n## Second heading\n\nMore text.\n\n"
+                 "Plain **bold**er, *em*, done.\n\n- alpha\n- beta\n")
 CHROME_CANDIDATES = (
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
     "/Applications/Chromium.app/Contents/MacOS/Chromium",
@@ -1040,7 +1065,18 @@ def cmd_selftest(args) -> int:
             {"kind": "text", "item": "d2", "name": "draft.md",
              "comments": [{"id": "c_2", "number": 2, "quote": "placeholder",
                            "anchor": {"prefix": "says ", "suffix": " a second"},
-                           "block": "d2#1", "note": "cut this"}],
+                           "block": "d2#1", "note": "cut this"},
+                          {"id": "m_4", "number": 4, "tool": "ellipse", "quote": "Second heading",
+                           "blocks": ["d2#2"], "box": {"x": 0.1, "y": 0.4, "w": 0.3, "h": 0.05},
+                           "note": "rename"},
+                          {"id": "c_5", "number": 5, "quote": "says\nSecond",
+                           "anchor": {"prefix": "A paragraph that ", "quote": "says\nSecond",
+                                      "suffix": " heading"},
+                           "block": "d2#1", "blocks": ["d2#1", "d2#2"],
+                           "parts": [{"block": "d2#1", "quote": "says"},
+                                     {"block": "d2#2", "quote": "Second"}], "note": "both"},
+                          {"id": "c_6", "number": 6, "tool": "<script>", "quote": "x",
+                           "anchor": {}, "blocks": [7, "d2#3"], "note": "forged"}],
              "edits": [{"block": "d2#0", "label": "h1", "before": "A", "after": "B"}]},
             {"kind": "media", "item": "d3", "page": 2, "pages": 3, "name": "statement.pdf, page 2",
              "overview_png": data, "crops": [{"mark": 3, "png": data}],
@@ -1063,6 +1099,24 @@ def cmd_selftest(args) -> int:
               ["box", "crop", "id", "note", "number", "tool"])
         check("a text page keeps its fields", sorted(text_page),
               ["comments", "edits", "edits_saved", "kind", "name", "source"])
+        check("a plain text comment gains no field", sorted(text_page["comments"][0]),
+              ["anchor", "block", "id", "note", "number", "quote"])
+        drawn, spanned, forged = text_page["comments"][1:]
+        check("a shape on a draft carries its tool and box, and an empty anchor", sorted(drawn),
+              ["anchor", "block", "box", "id", "note", "number", "quote", "tool"])
+        check("so a reader of anchor['prefix'] on every comment keeps working",
+              drawn["anchor"], {"prefix": "", "suffix": ""})
+        check("a shape on one block names it in `block` only",
+              [drawn["tool"], drawn["block"]], ["ellipse", "d2#2"])
+        check("a selection over two blocks gains only `blocks` and `parts`", sorted(spanned),
+              ["anchor", "block", "blocks", "id", "note", "number", "parts", "quote"])
+        check("its parts keep each block's own text", spanned["parts"],
+              [{"block": "d2#1", "quote": "says"}, {"block": "d2#2", "quote": "Second"}])
+        check("a selection over two blocks lists both", spanned["blocks"], ["d2#1", "d2#2"])
+        check("a tool or a block the page cannot produce is not carried",
+              [forged.get("tool"), forged["block"], "blocks" in forged], [None, "d2#3", False])
+        check("marks.md names the tool of a shape on a draft",
+              '4. [ellipse] "Second heading"' in (sess / "marks.md").read_text())
         check("source points at the original file", image_page["source"], str(card.resolve()))
         check("the crop was written", Path(image_page["marks"][0]["crop"]).exists())
         # Additions, and only additions, on a PDF page.
@@ -1214,6 +1268,164 @@ window.__TEST__ = async (api) => {
     const a2 = api.anchorFor(blk, r2);
     say("a repeated phrase anchors to the occurrence that was selected",
         a2.at === at && a2.anchor.prefix.endsWith("then says "), true);
+
+    // A selection may run over several paragraphs. An editable block is its own editing host and
+    // the browser clamps a selection to it, so a block is plain text until the caret is in it.
+    say("a draft block is not an editing host until it is clicked", blk.isContentEditable, false);
+    const doc = blk.closest(".doc[data-item]"), blks = [...doc.querySelectorAll("[data-blk]")];
+    const more = blks.find(b => b.textContent === "More text.");
+    const key = b => b.getAttribute("data-blk");
+
+    // The press and release handlers, driven with pointer events. A script cannot make a real drag
+    // here, so these pin the handlers' own logic: who is editable after which gesture.
+    const press = (el, type, extra) => { const r = el.getBoundingClientRect();
+      el.dispatchEvent(new PointerEvent(type, { bubbles: true, button: 0, pointerType: "mouse",
+        clientX: r.left + 4, clientY: r.top + 4, ...extra })); };
+    sel.collapse(blk.firstChild, 1);
+    press(blk, "pointerdown"); press(blk, "pointerup");
+    blk.dispatchEvent(new KeyboardEvent("keydown", { key: "a", bubbles: true }));
+    say("a key pressed straight after a click finds its block editable", blk.isContentEditable,
+        true);
+    sel.collapse(blk.firstChild, 3);
+    press(blk, "pointerdown"); press(blk, "pointerup"); await sleep(60);
+    say("a click makes its block editable", blk.isContentEditable, true);
+    say("and puts the caret there", document.activeElement === blk, true);
+    press(more, "pointerdown");
+    say("a press elsewhere drops it back to plain text at once", blk.isContentEditable, false);
+    sel.collapse(more.firstChild, 2); press(more, "pointerup"); await sleep(60);
+    say("and the block released in is the only editable one",
+        blks.filter(b => b.isContentEditable).map(key), [key(more)]);
+    press(blk, "pointerdown", { pointerType: "touch" });
+    say("a touch press strips nothing, so a scroll keeps the keyboard", more.isContentEditable, true);
+    press(blk, "pointercancel", { pointerType: "touch" });
+    sel.setBaseAndExtent(blk.firstChild, 12, blk.firstChild, 2);
+    press(blk, "pointerdown"); press(blk, "pointerup"); await sleep(60);
+    say("a backward selection keeps its direction",
+        [sel.anchorOffset, sel.focusOffset, blk.isContentEditable], [12, 2, true]);
+
+    // Shift+Arrow at the edge of an editable block carries on into the next one.
+    sel.collapse(blk.firstChild, blk.firstChild.length);
+    blk.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", shiftKey: true, bubbles: true }));
+    await sleep(60);
+    const touched = () => { const r = sel.getRangeAt(0);
+      return blks.filter(b => r.intersectsNode(b) && b.textContent.trim()).map(key); };
+    say("Shift+ArrowDown at a block's end extends into the next block",
+        touched().slice(0, 2), [key(blk), key(blks[blks.indexOf(blk) + 1])]);
+    say("and the block it left is plain text while the selection spans two",
+        blk.isContentEditable, false);
+    sel.collapse(blk.firstChild, 4); await sleep(60);
+    say("a caret back inside that block makes it editable again", blk.isContentEditable, true);
+    sel.removeAllRanges(); blk.blur();
+
+    const r3 = document.createRange();
+    r3.setStart(blk.firstChild, 2); r3.setEnd(more.firstChild, 4);
+    sel.removeAllRanges(); sel.addRange(r3);
+    await sleep(150);
+    const selbtn = document.getElementById("selbtn");
+    say("a selection over three blocks offers Comment", getComputedStyle(selbtn).display, "block");
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "µ", code: "KeyM", ctrlKey: true,
+                                                          altKey: true, bubbles: true }));
+    say("Ctrl+Alt+M comments on it", api.comments.length, 1);
+    const spanned = api.comments.at(-1);
+    say("its comment lists every block it touches", spanned.blocks,
+        blks.slice(blks.indexOf(blk), blks.indexOf(more) + 1).map(key));
+    say("its quote has one line per block", spanned.quote.split("\n").length, 3);
+    say("its parts keep each block's own text", spanned.parts.map(p => p.quote).join("\n"),
+        spanned.quote);
+    say("its prefix comes from the first block", spanned.anchor.prefix, "A ");
+    say("its suffix comes from the last block", spanned.anchor.suffix, " text.");
+
+    // A selection that leaves the draft for a PDF page has no single place to sit.
+    const r4 = document.createRange();
+    r4.setStart(spans[1].firstChild, 0); r4.setEnd(more.firstChild, 4);
+    sel.removeAllRanges(); sel.addRange(r4);
+    await sleep(150);
+    say("a selection from a PDF page into a draft offers no Comment",
+        getComputedStyle(selbtn).display, "none");
+    sel.removeAllRanges();
+
+    // Shapes on a draft, each by its own geometry, and the words under it as the draft shows them.
+    const ds = api.SURFACES.get(doc.dataset.item + "#marks");
+    say("a draft is a surface that takes marks", !!ds && ds.marksCanvas.width > 0, true);
+    const bb = () => ds.box.getBoundingClientRect();
+    const textRect = el => { const r = document.createRange(); r.selectNodeContents(el);
+      return r.getBoundingClientRect(); };
+    const frac = (x, y) => ({ x: (x - bb().left) / bb().width, y: (y - bb().top) / bb().height });
+    const shape = (tool, el, pad) => { const q = textRect(el), a = frac(q.left - pad, q.top - pad),
+      z = frac(q.right + pad, q.bottom + pad);
+      return { tool, x0: a.x, y0: a.y, x1: z.x, y1: z.y, path: [] }; };
+    const h2 = doc.querySelector("h2"), hq = textRect(h2);
+    const circle = shape("ellipse", h2, 14);
+    api.pinToBlock(ds, circle);
+    Object.assign(circle, api.textUnder(ds, circle));
+    say("a circle on a draft quotes the words inside it", circle.quote, "Second heading");
+    say("and names the block they are in", circle.blocks, [key(h2)]);
+    const tip = frac(hq.left + 10, hq.top + hq.height / 2);
+    say("an arrow quotes the word at its head",
+        api.textUnder(ds, { tool: "arrow", x0: tip.x - 0.1, y0: tip.y - 0.05, x1: tip.x, y1: tip.y,
+                            path: [] }).quote, "Second");
+    const line = [...Array(20)].map((_, i) => frac(hq.left + (hq.width * i) / 19, hq.bottom + 3));
+    say("a freehand underline quotes the words above it",
+        api.textUnder(ds, { tool: "free", x0: 0, y0: 0, x1: 0, y1: 0, path: line }).quote,
+        "Second heading");
+    // Both points 40 px clear of the text: only the segment between them crosses the words.
+    const sparse = [frac(hq.left - 40, hq.bottom + 3), frac(hq.right + 40, hq.bottom + 3)];
+    say("a fast underline with two points still quotes the words between them",
+        api.textUnder(ds, { tool: "free", x0: 0, y0: 0, x1: 0, y1: 0, path: sparse }).quote,
+        "Second heading");
+    const mixed = blks.find(b => b.querySelector("strong"));
+    const er = mixed.querySelector("strong").nextSibling, erR = document.createRange();
+    erR.setStart(er, 0); erR.setEnd(er, 2);
+    const erQ = erR.getBoundingClientRect(), erTip = frac(erQ.left + erQ.width / 2,
+                                                          erQ.top + erQ.height / 2);
+    const beta = [...doc.querySelectorAll("li")].find(li => li.textContent === "beta"),
+          bq = textRect(beta), bTip = frac(bq.left + bq.width / 2, bq.top + bq.height / 2);
+    say("an arrow at one list item quotes that item only, not its neighbours glued on",
+        api.textUnder(ds, { tool: "arrow", x0: bTip.x - 0.1, y0: bTip.y - 0.05, x1: bTip.x,
+                            y1: bTip.y, path: [] }).quote, "beta");
+    const keep = more.innerHTML;
+    more.innerHTML = "x<div></div>y<div>in</div>tail";
+    const arrowAt = node => { const r = document.createRange(); r.selectNodeContents(node);
+      const q = r.getBoundingClientRect(), t = frac(q.left + q.width / 2, q.top + q.height / 2);
+      return api.textUnder(ds, { tool: "arrow", x0: t.x - 0.1, y0: t.y - 0.05, x1: t.x, y1: t.y,
+                                 path: [] }).quote; };
+    say("text after a nested block is its own word", arrowAt(more.lastChild), "tail");
+    say("an empty nested block still splits the words around it",
+        arrowAt(more.childNodes[2]), "y");
+    more.innerHTML = keep;
+    say("an arrow at the end of a word split by bold markup quotes the whole word",
+        api.textUnder(ds, { tool: "arrow", x0: erTip.x - 0.1, y0: erTip.y - 0.05, x1: erTip.x,
+                            y1: erTip.y, path: [] }).quote, "bolder");
+    // From the first marked word to the last, so the closing full stop is not part of it.
+    say("a box over inline markup quotes the text as shown, with no invented spaces",
+        api.textUnder(ds, shape("rect", mixed, 4)).quote, "Plain bolder, em, done");
+    const gap = frac(bb().right - 6, bb().bottom - 6);
+    const empty = { tool: "rect", x0: gap.x - 0.001, y0: gap.y - 0.001, x1: gap.x, y1: gap.y,
+                    path: [] };
+    api.pinToBlock(ds, empty);
+    const none = api.textUnder(ds, empty);
+    say("a mark over no words still names a block and its box",
+        [none.quote, none.blocks.length, !!none.box], ["", 1, true]);
+
+    // An edit above a mark moves the mark with its words, so the quote does not change.
+    const para = blks.find(b => b.tagName === "P"), was = para.innerHTML;
+    para.innerHTML = was + "<br>" + "more words ".repeat(60);
+    say("a mark stays on its words after the draft above it grows",
+        api.textUnder(ds, circle).quote, "Second heading");
+    para.innerHTML = was;
+
+    // What Send posts: the shape and the multi-block comment, with the fields SKILL.md documents.
+    api.marks.push({ ...circle, id: 970, item: ds.key, note: "rename it" });
+    const batch = await api.buildBatch();
+    const tp = batch.pages.find(p => p.kind === "text");
+    const sent = tp && tp.comments.find(c => c.id === "m_970");
+    say("Send carries a shape on a draft with its words, block and box",
+        sent && [sent.tool, sent.quote, sent.blocks, !!sent.box],
+        ["ellipse", "Second heading", [key(h2)], true]);
+    say("Send carries the multi-block comment's blocks",
+        tp && tp.comments.find(c => c.id === "c_" + spanned.id)?.blocks, spanned.blocks);
+    say("no media page is made for a draft", batch.pages.filter(p => p.kind === "media").length, 0);
+    api.marks.length = 0; api.comments.length = 0;
 
     // Marks on a PDF page, and the crop that comes out of them.
     api.marks.push({ id: 900, item: first.key, tool: "rect", note: "look here",

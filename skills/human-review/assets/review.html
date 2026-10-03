@@ -170,7 +170,11 @@
         height: auto;
         border-radius: 8px;
       }
-      .media canvas.marks {
+      .drawbox {
+        position: relative;
+      }
+      .media canvas.marks,
+      .drawbox canvas.marks {
         position: absolute;
         inset: 0;
         width: 100%;
@@ -178,9 +182,16 @@
         border-radius: 8px;
         pointer-events: none;
       }
-      body.drawing .media canvas.marks {
+      body.drawing .media canvas.marks,
+      body.drawing .drawbox canvas.marks {
         pointer-events: auto;
         cursor: crosshair;
+      }
+      /* On a draft only: touch-action:none, or a finger stroke is taken as a scroll and ends in
+         pointercancel. A session with a draft has the Text tool to scroll in. A session of images
+         has no other tool, so its pictures keep scrolling under a finger. */
+      body.drawing .drawbox canvas.marks {
+        touch-action: none;
       }
       body.drawing .textLayer {
         pointer-events: none;
@@ -316,6 +327,11 @@
       [data-blk]:focus {
         background: #fffbe9;
         box-shadow: 0 0 0 3px rgba(210, 170, 40, 0.18);
+      }
+      /* Every block is a tab stop, so a keyboard user needs the same ring as everywhere else. */
+      [data-blk]:focus-visible {
+        outline: 2px solid #1d6fd0;
+        outline-offset: 2px;
       }
       [data-blk].touched {
         background: #fff7dd;
@@ -759,8 +775,15 @@
       </button>
       <span class="grp tools">
         <span class="lbl hide-s">Mark</span>
-        <button class="btn tool" data-tool="select" aria-pressed="false" hidden>
-          Select text
+        <button
+          class="btn tool"
+          data-tool="select"
+          aria-pressed="false"
+          aria-label="Text: select to comment, type to edit"
+          title="Select to comment, type to edit"
+          hidden
+        >
+          Text
         </button>
         <button class="btn tool" data-tool="ellipse" aria-pressed="true">
           Circle
@@ -775,7 +798,7 @@
           Arrow
         </button>
         <button class="btn" id="undo">
-          Undo<span class="hide-s"> last mark</span>
+          Undo<span class="hide-s"> last</span> mark
         </button>
       </span>
       <span class="grp hide-s"
@@ -796,7 +819,7 @@
         <h2>Feedback</h2>
         <div id="feed">
           <p class="empty">
-            Nothing yet. Circle a spot on an image or a PDF page, or select text
+            Nothing yet. Circle a spot on an image, a PDF page or a draft, or select text
             and click Comment. Typing in a draft counts as an edit on its own.
           </p>
         </div>
@@ -820,7 +843,13 @@
       </button>
       <button class="send" id="send">Send</button><span id="status"></span>
     </footer>
-    <button id="selbtn">Comment</button>
+    <button
+      id="selbtn"
+      aria-keyshortcuts="Control+Alt+M Meta+Alt+M"
+      title="Comment (Ctrl+Alt+M, Cmd+Option+M on a Mac)"
+    >
+      Comment
+    </button>
 
     <script nonce="__NONCE__">
       /*__BOOT__*/
@@ -834,10 +863,12 @@
 
       const ITEMS = window.__ITEMS__,
         COLOR = "#c8321e";
-      const HAS_PDF = ITEMS.some((i) => i.format === "pdf");
-      // A session with a PDF opens in the tool a PDF viewer opens in. A session of pictures opens in
-      // Circle, which is the habit and the only useful tool there.
-      let tool = HAS_PDF ? "select" : "ellipse";
+      // A draft or a PDF has text to select, edit and comment on, so the Text tool is offered and the
+      // session opens in it. A session of pictures opens in Circle, the only useful tool there.
+      const HAS_TEXT = ITEMS.some(
+        (i) => i.kind === "text" || i.format === "pdf",
+      );
+      let tool = HAS_TEXT ? "select" : "ellipse";
       let marks = [],
         comments = [],
         seq = 0,
@@ -894,12 +925,14 @@
         doc.className = "doc";
         doc.dataset.item = item.id;
         doc.innerHTML = item.html;
-        // Every top-level block becomes editable and gets a stable key, so a change can be reported
-        // as before/after on that block instead of as a diff of the whole document.
+        // Every top-level block gets a stable key, so a change can be reported as before/after on that
+        // block instead of as a diff of the whole document. A block turns editable only once the
+        // caret is in it (see "editing one block at a time"): an editable block is its own editing
+        // host, and the browser clamps a selection to its host, so a comment could never span two.
         [...doc.children].forEach((el, i) => {
           const key = `${item.id}#${i}`;
           el.setAttribute("data-blk", key);
-          el.setAttribute("contenteditable", "true");
+          el.setAttribute("tabindex", "0");
           el.setAttribute("spellcheck", "false");
           el.addEventListener("input", () => {
             el.classList.toggle(
@@ -918,7 +951,28 @@
             originals.set(el.getAttribute("data-blk"), norm(el.innerText)),
           );
         });
-        host.append(doc);
+        // A draft is a surface too, so a circle, box, scribble or arrow can sit on it. Its marks are
+        // reported with the words under them (see textUnder), because a draft has no picture to crop.
+        const box = document.createElement("div");
+        box.className = "drawbox";
+        const cv = document.createElement("canvas");
+        cv.className = "marks";
+        box.append(doc, cv);
+        host.append(box);
+        const key = `${item.id}#marks`;
+        const surface = {
+          key,
+          item: item.id,
+          label: item.name,
+          box,
+          marksCanvas: cv,
+          wrap: host,
+          doc,
+        };
+        SURFACES.set(key, surface);
+        bindDrawing(cv, key);
+        // The draft's height moves with every edit, and the canvas has to follow it.
+        new ResizeObserver(() => sizeMarks(surface)).observe(box);
       }
 
       const pdfDocs = new Map(); // item id -> PDFDocumentProxy
@@ -1090,19 +1144,25 @@
       );
 
       // A mark canvas carries device pixels too, or a stroke over a sharp page looks like a sticker.
+      // A draft's mark canvas is as tall as the draft. iOS Safari refuses a canvas over 16,777,216
+      // pixels and then draws nothing, which a long draft at 3x passes, so the ratio steps down
+      // until the canvas fits. A mark on a very long draft is softer, never missing.
+      const MAX_CANVAS_PX = 16e6;
       function sizeMarks(surface) {
         const cv = surface.marksCanvas,
-          dpr = window.devicePixelRatio || 1;
-        const w = Math.max(1, Math.round(surface.box.clientWidth * dpr));
-        const h = Math.max(
-          1,
-          Math.round((surface.box.clientHeight || 1) * dpr),
-        );
+          cw = surface.box.clientWidth || 1,
+          ch = surface.box.clientHeight || 1,
+          dpr = Math.min(
+            window.devicePixelRatio || 1,
+            Math.sqrt(MAX_CANVAS_PX / (cw * ch)),
+          );
+        const w = Math.max(1, Math.round(cw * dpr));
+        const h = Math.max(1, Math.round(ch * dpr));
         if (cv.width !== w || cv.height !== h) {
           cv.width = w;
           cv.height = h;
         }
-        redraw();
+        redraw(surface.key);
       }
 
       let relayout = null;
@@ -1170,32 +1230,233 @@
         };
       }
 
+      /* ---------------- editing one block at a time ---------------- */
+      const elementOf = (n) => (n?.nodeType === 1 ? n : n?.parentElement);
+      const setEditable = (el, on) =>
+        on
+          ? el.setAttribute("contenteditable", "true")
+          : el.removeAttribute("contenteditable");
+
+      // The part of `range` inside each block it touches, in document order. A block the range only
+      // grazes (a triple-click ends at offset 0 of the NEXT block) has no text in it and is left out.
+      function blockParts(range) {
+        const doc = elementOf(range.commonAncestorContainer)?.closest(
+          ".doc[data-item]",
+        );
+        if (!doc) return [];
+        return [...doc.querySelectorAll("[data-blk]")]
+          .filter((b) => range.intersectsNode(b))
+          .map((b) => {
+            const r = document.createRange();
+            r.selectNodeContents(b);
+            if (range.compareBoundaryPoints(Range.START_TO_START, r) > 0)
+              r.setStart(range.startContainer, range.startOffset);
+            if (range.compareBoundaryPoints(Range.END_TO_END, r) < 0)
+              r.setEnd(range.endContainer, range.endOffset);
+            return { blk: b, range: r };
+          })
+          .filter((p) => p.range.toString().trim());
+      }
+
+      function caretAt(x, y) {
+        if (document.caretRangeFromPoint) return document.caretRangeFromPoint(x, y);
+        const p = document.caretPositionFromPoint?.(x, y);
+        if (!p) return null;
+        const r = document.createRange();
+        r.setStart(p.offsetNode, p.offset);
+        return r;
+      }
+
+      // True when the selection's focus lies before its anchor: a drag or a Shift+click backwards.
+      function isBackward(s) {
+        if (s.anchorNode === s.focusNode) return s.focusOffset < s.anchorOffset;
+        const r = document.createRange();
+        r.setStart(s.anchorNode, s.anchorOffset);
+        r.setEnd(s.focusNode, s.focusOffset);
+        return r.collapsed; // an end before the start collapses the range onto the end
+      }
+
+      // A mouse or pen press drops every block back to plain text, so a drag can run on across
+      // paragraphs. The release makes the one block it ended in editable again, with the selection
+      // as the reviewer left it, direction included. A selection over two or more blocks stays
+      // plain: it is for a comment. A touch press strips nothing: on a phone most presses on a draft
+      // start a scroll, and stripping the block being typed in would close the keyboard and drop an
+      // open IME composition.
+      let pressing = false,
+        composing = false; // an IME holds a word open; its host must stay put until it commits
+      document.addEventListener("compositionstart", () => (composing = true));
+      document.addEventListener("compositionend", () => (composing = false));
+      document.addEventListener("pointerdown", (e) => {
+        if (e.button !== 0 || !e.target.closest?.(".doc[data-item]")) return;
+        pressing = true;
+        if (e.pointerType === "touch" || composing) return;
+        document
+          .querySelectorAll("[data-blk][contenteditable]")
+          .forEach((b) => setEditable(b, false));
+      });
+      const release = () => (pressing = false);
+      document.addEventListener("pointercancel", release);
+      window.addEventListener("blur", release); // a release over another window never arrives
+      document.addEventListener("pointerup", (e) => {
+        if (!pressing) return;
+        pressing = false;
+        // A mouse release settles the selection in the browser's own default action, after this
+        // event: a click inside an old selection collapses it only then. So it is read one task
+        // later. A tap is handled at once, because iOS raises the keyboard only for a focus() made
+        // inside the gesture.
+        if (e.pointerType === "touch") settle(e);
+        else {
+          unsettled = e;
+          setTimeout(settlePending, 0);
+        }
+      });
+      // A key pressed before that task runs settles it first. The browser serves input ahead of
+      // timers, so a fast typist's first keys otherwise land on a block that is not editable yet:
+      // measured, 65 typed characters lost straight after a click.
+      let unsettled = null;
+      const settlePending = () => {
+        const e = unsettled;
+        unsettled = null;
+        if (e) settle(e);
+      };
+      document.addEventListener("keydown", settlePending, true);
+      function settle(e) {
+        const s = document.getSelection();
+        let range = s?.rangeCount ? s.getRangeAt(0) : null;
+        // A long-press selection on a phone is left alone: an editable block would raise the
+        // keyboard over the selection handles.
+        if (e.pointerType === "touch" && range && !range.collapsed) return;
+        // A tap on plain text can leave no caret at all, so it is placed from the point.
+        if (!range || range.collapsed)
+          range = caretAt(e.clientX, e.clientY) || range;
+        if (!range) return;
+        const blk = elementOf(range.startContainer)?.closest("[data-blk]");
+        const parts = range.collapsed ? [] : blockParts(range);
+        if (!blk || parts.length > 1 || (parts.length && parts[0].blk !== blk))
+          return;
+        // Only the part inside this block is kept: a triple-click ends at offset 0 of the next one.
+        const keep = parts.length ? parts[0].range : range,
+          back = !range.collapsed && isBackward(s);
+        document
+          .querySelectorAll("[data-blk][contenteditable]")
+          .forEach((b) => b !== blk && setEditable(b, false));
+        setEditable(blk, true);
+        blk.focus({ preventScroll: true });
+        const [a, f] = back
+          ? [[keep.endContainer, keep.endOffset], [keep.startContainer, keep.startOffset]]
+          : [[keep.startContainer, keep.startOffset], [keep.endContainer, keep.endOffset]];
+        s.setBaseAndExtent(...a, ...f);
+      }
+
+      // Keyboard reach for a selection over several blocks. Shift+Arrow inside an editable block is
+      // the browser's, and it stops at the block's edge, because the block is its own editing host.
+      // When a step did not move the selection, the block drops back to plain text and every step
+      // from there on is taken by hand, across as many blocks as the reviewer goes.
+      const EXTEND = {
+        ArrowUp: ["backward", "line"],
+        ArrowDown: ["forward", "line"],
+        // left and right are visual, so they keep their meaning in right-to-left text
+        ArrowLeft: ["left", "character"],
+        ArrowRight: ["right", "character"],
+      };
+      document.addEventListener("keydown", (e) => {
+        if (e.isComposing || composing) return;
+        const step = e.shiftKey && !e.metaKey && !e.ctrlKey && EXTEND[e.key];
+        const blk = step && document.activeElement?.closest?.(".doc [data-blk]");
+        const s = document.getSelection();
+        if (!blk || !s?.rangeCount) return;
+        const extend = () =>
+          s.modify(
+            "extend",
+            step[0],
+            e.altKey && step[1] === "character" ? "word" : step[1],
+          );
+        if (!blk.isContentEditable) {
+          e.preventDefault();
+          extend();
+          return;
+        }
+        const was = [s.focusNode, s.focusOffset];
+        setTimeout(() => {
+          if (s.focusNode !== was[0] || s.focusOffset !== was[1]) return;
+          setEditable(blk, false);
+          extend();
+        }, 0);
+      });
+
+      // A link in a draft is text under review, not a way off the page.
+      document.addEventListener(
+        "click",
+        (e) => e.target.closest?.(".doc a[href]") && e.preventDefault(),
+        true,
+      );
+      // Tab still reaches every block, and a block reached that way is editable at once.
+      document.addEventListener("focusin", (e) => {
+        const blk = e.target.closest?.("[data-blk]");
+        if (blk && !pressing) setEditable(blk, true);
+      });
+      document.addEventListener("focusout", (e) => {
+        const blk = e.target.closest?.("[data-blk]");
+        if (blk && !pressing) setEditable(blk, false);
+      });
+
+      // A block that Shift+Arrow turned to plain text becomes editable again as soon as the
+      // selection is back inside it, so typing works without another click.
+      function reclaim(s) {
+        const blk = document.activeElement?.closest?.(".doc [data-blk]");
+        if (!blk || blk.isContentEditable || pressing || !s.rangeCount) return;
+        const parts = s.isCollapsed ? [] : blockParts(s.getRangeAt(0));
+        const inside = s.isCollapsed
+          ? blk.contains(s.anchorNode)
+          : parts.length === 1 && parts[0].blk === blk;
+        if (inside) setEditable(blk, true);
+      }
+
       document.addEventListener("selectionchange", () => {
         const s = document.getSelection();
         pendingSel = null;
+        if (s) reclaim(s);
         if (!s || s.isCollapsed || !s.rangeCount) {
           selBtn.style.display = "none";
           return;
         }
         const range = s.getRangeAt(0);
-        const node =
-          range.startContainer.nodeType === 1
-            ? range.startContainer
-            : range.startContainer.parentElement;
-        const blk = node?.closest("[data-blk]"),
-          layer = node?.closest(".textLayer");
-        if (!s.toString().trim() || (!blk && !layer)) {
+        const parts = blockParts(range),
+          layer = elementOf(range.startContainer)?.closest(".textLayer"),
+          endLayer = elementOf(range.endContainer)?.closest(".textLayer");
+        // A comment sits on one draft or one PDF page. A selection that runs from a page into a
+        // draft, or across two pages, has no single place to anchor, so it offers no Comment.
+        const oneDoc = parts.length
+          ? !layer && !endLayer
+          : !!layer && layer === endLayer;
+        if (!s.toString().trim() || !oneDoc) {
           selBtn.style.display = "none";
           return;
         }
-        if (blk) {
-          const a = anchorFor(blk, range);
+        if (parts.length) {
+          // One block anchors as before. Over several, the prefix comes from the first, the suffix
+          // from the last, and `parts` keeps each block's own text, because a code block can hold
+          // newlines of its own and the joined quote then cannot be split back reliably.
+          const first = anchorFor(parts[0].blk, parts[0].range),
+            last = anchorFor(parts.at(-1).blk, parts.at(-1).range),
+            quote = parts.map((p) => p.range.toString()).join("\n");
           pendingSel = {
             kind: "text",
-            block: blk.getAttribute("data-blk"),
-            item: blk.closest("[data-item]").dataset.item,
-            quote: a.quote,
-            anchor: a.anchor,
+            block: parts[0].blk.getAttribute("data-blk"),
+            ...(parts.length > 1 && {
+              blocks: parts.map((p) => p.blk.getAttribute("data-blk")),
+              parts: parts.map((p) => ({
+                block: p.blk.getAttribute("data-blk"),
+                quote: p.range.toString(),
+              })),
+            }),
+            item: parts[0].blk.closest("[data-item]").dataset.item,
+            quote,
+            anchor: {
+              prefix: first.anchor.prefix,
+              quote,
+              suffix: last.anchor.suffix,
+            },
           };
         } else {
           const box = layer.closest(".media"),
@@ -1291,12 +1552,12 @@
         $("#hint").textContent =
           name === "select"
             ? "select text in a PDF or a draft to comment, type in a draft to edit"
-            : "drag on a picture or a PDF page to mark it";
+            : "drag on a picture, a PDF page or a draft to mark it";
       }
       document
         .querySelectorAll(".tool")
         .forEach((b) => (b.onclick = () => setTool(b.dataset.tool)));
-      if (HAS_PDF)
+      if (HAS_TEXT)
         document.querySelector('.tool[data-tool="select"]').hidden = false;
       setTool(tool);
       document.getElementById("undo").onclick = () => {
@@ -1306,6 +1567,7 @@
         saveDraft();
       };
 
+      const MIN_MARK_PX = 10; // a smaller gesture is a slip of the pen, not a mark
       function relPos(ev, cv) {
         const r = cv.getBoundingClientRect();
         return {
@@ -1336,15 +1598,30 @@
           drawing.x1 = p.x;
           drawing.y1 = p.y;
           if (drawing.tool === "free") drawing.path.push(p);
-          redraw();
+          redraw(key); // only the surface under the pen, not every page of the session
+        });
+        // A cancelled stroke (the browser took the gesture) is dropped, not left half-drawn.
+        cv.addEventListener("pointercancel", () => {
+          drawing = null;
+          redraw(key);
         });
         cv.addEventListener("pointerup", () => {
           if (!drawing) return;
+          // In CSS pixels, not in fractions of the surface: on a draft 20,000 px tall a fraction
+          // would drop an arrow a hand's width long.
+          const r = cv.getBoundingClientRect();
           const big =
-            Math.abs(drawing.x1 - drawing.x0) > 0.012 ||
-            Math.abs(drawing.y1 - drawing.y0) > 0.012 ||
+            Math.abs(drawing.x1 - drawing.x0) * r.width > MIN_MARK_PX ||
+            Math.abs(drawing.y1 - drawing.y0) * r.height > MIN_MARK_PX ||
             drawing.path.length > 4;
           if (big) {
+            // On a draft the words are read NOW, while the mark sits on what the reviewer meant, and
+            // the mark is pinned to its block so an edit above it cannot move it onto other words.
+            const surface = SURFACES.get(key);
+            if (surface.doc) {
+              pinToBlock(surface, drawing);
+              Object.assign(drawing, textUnder(surface, drawing));
+            }
             marks.push(drawing);
             activeId = drawing.id;
           }
@@ -1439,15 +1716,25 @@
         ctx.restore();
       }
 
-      function redraw() {
+      // `only` names one surface to repaint; without it every surface is repainted. Numbers are
+      // worked out once per call, not once per mark.
+      function redraw(only) {
+        const order = ordered().map((x) => x.id);
         SURFACES.forEach((surface) => {
+          if (only && surface.key !== only) return;
           const cv = surface.marksCanvas,
             ctx = cv.getContext("2d");
           ctx.clearRect(0, 0, cv.width, cv.height);
           marks
             .filter((m) => m.item === surface.key)
             .forEach((m) =>
-              strokeMark(ctx, m, cv.width, cv.height, numberOf(m)),
+              strokeMark(
+                ctx,
+                placed(surface, m),
+                cv.width,
+                cv.height,
+                order.indexOf(m.id) + 1,
+              ),
             );
           if (drawing && drawing.item === surface.key)
             strokeMark(ctx, drawing, cv.width, cv.height, 0);
@@ -1606,7 +1893,9 @@
           behavior: RM.matches ? "auto" : "smooth",
         });
         if (focus) {
-          stop.el.setAttribute("tabindex", "-1");
+          // A heading of a draft is a tab stop already; -1 would take it out of the tab order.
+          if (!stop.el.hasAttribute("tabindex"))
+            stop.el.setAttribute("tabindex", "-1");
           stop.el.focus({ preventScroll: true });
         }
         closeDrawers();
@@ -1696,11 +1985,14 @@
       }
 
       /* ---------------- keys ---------------- */
+      // A focused draft block counts even while it is plain text: after Shift+Arrow a letter is the
+      // reviewer typing, never a jump to the next page.
       const typing = () => {
         const el = document.activeElement;
         return (
           !!el &&
           (el.isContentEditable ||
+            !!el.closest?.(".doc [data-blk]") ||
             ["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName))
         );
       };
@@ -1710,6 +2002,22 @@
           e.preventDefault();
           const b = document.getElementById("send");
           if (b && !b.disabled) b.click();
+          return;
+        }
+        // Ctrl+Alt+M (Cmd+Option+M on a Mac) comments on the selection, as in Google Docs. It works
+        // while typing, because a keyboard selection starts inside an editable block, and it saves
+        // a keyboard user the trip through every block to reach the floating Comment button.
+        // AltGr arrives as Ctrl+Alt on Windows, and AltGr+M types µ on a German layout: not ours.
+        if (
+          (e.metaKey || e.ctrlKey) &&
+          e.altKey &&
+          e.code === "KeyM" &&
+          !e.getModifierState?.("AltGraph")
+        ) {
+          if (pendingSel) {
+            e.preventDefault();
+            selBtn.onclick();
+          }
           return;
         }
         if (e.key === "Escape" && document.body.classList.contains("drawer")) {
@@ -1823,7 +2131,7 @@
         document.getElementById("sidecnt").textContent =
           list.length + eds.length;
         if (!list.length && !eds.length) {
-          host.innerHTML = `<p class="empty">Nothing yet. Circle a spot on an image or a PDF page, or
+          host.innerHTML = `<p class="empty">Nothing yet. Circle a spot on an image, a PDF page or a draft, or
       select text and click Comment. Typing in a draft counts as an edit on its own.</p>`;
           redraw();
           refreshCounts();
@@ -1865,8 +2173,10 @@
           // the caret vanished on the first click. Toggle the class on the live nodes instead.
           el.onclick = (ev) => {
             setActive(m.id);
-            if (ev.target.tagName !== "TEXTAREA" && SURFACES.get(m.item))
-              jumpTo(m.item, false);
+            // A PDF page is a stop of its own; an image or a draft is reached by its document.
+            const s = SURFACES.get(m.item);
+            if (ev.target.tagName !== "TEXTAREA" && s)
+              jumpTo(s.page ? m.item : `doc:${s.item}`, false);
           };
           host.append(el);
         });
@@ -1912,6 +2222,244 @@
         CROP_LONG = 1500,
         MAX_SCALE = 8;
 
+      // The extent of a mark as fractions of its surface: a freehand stroke by its path, every
+      // other shape by its two corners.
+      function markBounds(m) {
+        const xs = m.tool === "free" ? m.path.map((p) => p.x) : [m.x0, m.x1];
+        const ys = m.tool === "free" ? m.path.map((p) => p.y) : [m.y0, m.y1];
+        return {
+          x0: Math.min(...xs),
+          x1: Math.max(...xs),
+          y0: Math.min(...ys),
+          y1: Math.max(...ys),
+        };
+      }
+
+      /* ---------------- marks on a draft ---------------- */
+      // A draft reflows and a picture does not. So a mark on a draft remembers the block under its
+      // centre and where that block sat when it was drawn, and is drawn from where the block is
+      // now: text typed above it moves the mark with its words.
+      function blockAt(surface, y) {
+        const b = surface.box.getBoundingClientRect();
+        let best = null,
+          dist = Infinity;
+        surface.doc.querySelectorAll("[data-blk]").forEach((el) => {
+          const r = el.getBoundingClientRect(),
+            top = r.top - b.top,
+            bottom = r.bottom - b.top,
+            d = y < top ? top - y : y > bottom ? y - bottom : 0;
+          if (d < dist) [dist, best] = [d, el];
+        });
+        return best;
+      }
+      function pinToBlock(surface, m) {
+        const b = surface.box.getBoundingClientRect(),
+          k = markBounds(m),
+          blk = blockAt(surface, ((k.y0 + k.y1) / 2) * b.height);
+        if (!blk) return;
+        const r = blk.getBoundingClientRect();
+        m.pin = {
+          blk: blk.getAttribute("data-blk"),
+          x: r.left - b.left,
+          y: r.top - b.top,
+          w: b.width,
+          h: b.height,
+        };
+      }
+      // The mark as it sits now, in fractions of the draft as it is now.
+      function placed(surface, m) {
+        const pin = m.pin,
+          blk =
+            pin &&
+            surface.doc?.querySelector(`[data-blk="${CSS.escape(pin.blk)}"]`);
+        if (!blk) return m;
+        const b = surface.box.getBoundingClientRect(),
+          r = blk.getBoundingClientRect();
+        const fx = (x) => (x * pin.w + r.left - b.left - pin.x) / b.width,
+          fy = (y) => (y * pin.h + r.top - b.top - pin.y) / b.height;
+        return {
+          ...m,
+          x0: fx(m.x0),
+          x1: fx(m.x1),
+          y0: fy(m.y0),
+          y1: fy(m.y1),
+          path: (m.path || []).map((p) => ({ x: fx(p.x), y: fy(p.y) })),
+        };
+      }
+
+      // How close, in CSS pixels, an arrow's head must come to a word to point at it, and an open
+      // stroke to mark it. An underline runs a few pixels below the glyphs.
+      const ARROW_REACH = 8,
+        STROKE_REACH = 8;
+      // Words, not runs of non-space: Chinese, Japanese and Thai put no spaces between words.
+      const SEGMENTER =
+        typeof Intl.Segmenter === "function"
+          ? new Intl.Segmenter(undefined, { granularity: "word" })
+          : null;
+      // The elements a word cannot run across. Inline ones (strong, em, a, span) are not here.
+      const WORD_RUNS =
+        "li,td,th,tr,p,pre,div,dd,dt,blockquote,h1,h2,h3,h4,h5,h6,figcaption,caption";
+      const wordsOf = (text) =>
+        SEGMENTER
+          ? [...SEGMENTER.segment(text)]
+              .filter((s) => s.isWordLike)
+              .map((s) => [s.index, s.segment.length])
+          : [...text.matchAll(/\S+/g)].map((w) => [w.index, w[0].length]);
+
+      function insidePolygon(pts, x, y) {
+        let hit = false;
+        for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+          const a = pts[i],
+            b = pts[j];
+          if (a.y > y !== b.y > y && x < ((b.x - a.x) * (y - a.y)) / (b.y - a.y) + a.x)
+            hit = !hit;
+        }
+        return hit;
+      }
+      const distToRect = (q, x, y) =>
+        Math.hypot(
+          Math.max(q.l - x, 0, x - q.r),
+          Math.max(q.t - y, 0, y - q.b),
+        );
+
+      // Which of the draft's words a mark points at, by the mark's own shape: a box takes the words
+      // whose centre is inside it, a circle the words inside the ellipse, a lasso the words inside
+      // the loop, an open stroke (underline, strike, scribble) the word nearest each point it
+      // passes, and an arrow the word at its head.
+      function markedWords(m, words, W, H) {
+        const k = markBounds(m),
+          [l, r, t, b] = [k.x0 * W, k.x1 * W, k.y0 * H, k.y1 * H];
+        if (m.tool === "rect")
+          return words.filter((q) => q.cx >= l && q.cx <= r && q.cy >= t && q.cy <= b);
+        if (m.tool === "ellipse") {
+          const [ex, ey] = [(l + r) / 2, (t + b) / 2],
+            [rx, ry] = [Math.max(1, (r - l) / 2), Math.max(1, (b - t) / 2)];
+          return words.filter(
+            (q) => ((q.cx - ex) / rx) ** 2 + ((q.cy - ey) / ry) ** 2 <= 1,
+          );
+        }
+        const nearest = (x, y, reach) => {
+          let best = null,
+            dist = reach;
+          words.forEach((q) => {
+            const d = distToRect(q, x, y);
+            if (d <= dist) [dist, best] = [d, q];
+          });
+          return best;
+        };
+        if (m.tool === "arrow") {
+          const q = nearest(m.x1 * W, m.y1 * H, ARROW_REACH);
+          return q ? [q] : [];
+        }
+        const pts = m.path.map((p) => ({ x: p.x * W, y: p.y * H })),
+          [a, z] = [pts[0], pts.at(-1)],
+          closed =
+            pts.length > 8 &&
+            Math.hypot(a.x - z.x, a.y - z.y) < 0.25 * Math.hypot(r - l, b - t);
+        if (closed) return words.filter((q) => insidePolygon(pts, q.cx, q.cy));
+        // The stroke as drawn, not only where the pointer reported: a fast underline sends few
+        // points, and the segment between two of them can cross a word neither point is near.
+        const dense = pts.flatMap((p, i) => {
+          const o = pts[i - 1];
+          if (!o) return [p];
+          const n = Math.ceil(Math.hypot(p.x - o.x, p.y - o.y) / (STROKE_REACH / 2));
+          return [...Array(n)].map((_, j) => ({
+            x: o.x + ((p.x - o.x) * (j + 1)) / n,
+            y: o.y + ((p.y - o.y) * (j + 1)) / n,
+          }));
+        });
+        return [...new Set(dense.map((p) => nearest(p.x, p.y, STROKE_REACH)))].filter(
+          Boolean,
+        );
+      }
+
+      // The words a mark on a draft sits on. Per block, the quote runs from the first marked word
+      // to the last as the draft shows it, punctuation and inline markup included, so it can be
+      // found in the source. A mark over no words still names the block it sits on, and `box`
+      // says where it is.
+      function textUnder(surface, mark) {
+        const m = placed(surface, mark),
+          b = surface.box.getBoundingClientRect(),
+          words = [];
+        // Words are found in each block's whole text, then mapped back to its text nodes, so
+        // `<strong>bold</strong>er` is one word "bolder", not "bold" and "er".
+        // A list item, a table cell, a line break or a nested block still ends a word: a rendered
+        // list has no whitespace between its items, and "alpha" "beta" must not become one word.
+        // Two text nodes in different structural containers are split, which covers both entering
+        // a nested list and the text that follows it.
+        for (const blk of surface.doc.querySelectorAll("[data-blk]")) {
+          const nodes = [],
+            walk = document.createTreeWalker(
+              blk,
+              NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT,
+            );
+          let text = "",
+            run;
+          for (let n = walk.nextNode(); n; n = walk.nextNode()) {
+            if (n.nodeType === 1) {
+              // entering one breaks too, so an empty nested block still splits its neighbours
+              if (n.tagName === "BR" || n.matches(WORD_RUNS)) text += "\n";
+              continue;
+            }
+            const box = n.parentElement.closest(WORD_RUNS);
+            if (run !== undefined && box !== run) text += "\n";
+            run = box;
+            nodes.push([n, text.length]);
+            text += n.data;
+          }
+          // A start on a node boundary belongs to the later node, an end to the earlier one.
+          const point = (i, end) => {
+            let k = nodes.length - 1;
+            while (k > 0 && (end ? nodes[k][1] >= i : nodes[k][1] > i)) k--;
+            return [nodes[k][0], i - nodes[k][1]];
+          };
+          for (const [at, len] of wordsOf(text)) {
+            const range = document.createRange();
+            range.setStart(...point(at, false));
+            range.setEnd(...point(at + len, true));
+            const q = range.getBoundingClientRect();
+            if (!q.width || !q.height) continue; // laid out but not shown
+            const [l, t] = [q.left - b.left, q.top - b.top];
+            words.push({
+              range,
+              blk,
+              l,
+              t,
+              r: l + q.width,
+              b: t + q.height,
+              cx: l + q.width / 2,
+              cy: t + q.height / 2,
+            });
+          }
+        }
+        const hit = new Set(markedWords(m, words, b.width, b.height)),
+          byBlock = new Map();
+        words
+          .filter((q) => hit.has(q))
+          .forEach((q) => {
+            const span = byBlock.get(q.blk);
+            if (span) span.setEnd(q.range.endContainer, q.range.endOffset);
+            else byBlock.set(q.blk, q.range.cloneRange());
+          });
+        const k = markBounds(m),
+          blocks = [...byBlock.keys()].map((el) => el.getAttribute("data-blk"));
+        const parts = [...byBlock].map(([el, span]) => ({
+          block: el.getAttribute("data-blk"),
+          quote: span.toString(),
+        }));
+        return {
+          blocks: blocks.length ? blocks : m.pin ? [m.pin.blk] : [],
+          ...(parts.length > 1 && { parts }),
+          quote: parts.map((p) => p.quote).join("\n"),
+          box: {
+            x: +k.x0.toFixed(4),
+            y: +k.y0.toFixed(4),
+            w: +(k.x1 - k.x0).toFixed(4),
+            h: +(k.y1 - k.y0).toFixed(4),
+          },
+        };
+      }
+
       async function exportSurface(surface) {
         const mine = marks.filter((m) => m.item === surface.key);
         if (!mine.length) return null;
@@ -1943,12 +2491,7 @@
         }
         const crops = [];
         for (const m of mine) {
-          const xs = m.tool === "free" ? m.path.map((p) => p.x) : [m.x0, m.x1];
-          const ys = m.tool === "free" ? m.path.map((p) => p.y) : [m.y0, m.y1];
-          let fx0 = Math.min(...xs),
-            fx1 = Math.max(...xs),
-            fy0 = Math.min(...ys),
-            fy1 = Math.max(...ys);
+          let { x0: fx0, x1: fx1, y0: fy0, y1: fy1 } = markBounds(m);
           const px = Math.max((fx1 - fx0) * 0.35, 0.05),
             py = Math.max((fy1 - fy0) * 0.35, 0.035);
           fx0 = Math.max(0, fx0 - px);
@@ -2123,6 +2666,9 @@
               jumpTo,
               SURFACES,
               anchorFor,
+              textUnder,
+              pinToBlock,
+              buildBatch,
               exportSurface,
               setTool,
               buildTextLayer,
@@ -2131,15 +2677,12 @@
         }),
       );
 
-      document.getElementById("send").onclick = async () => {
-        sending = true;
-        clearTimeout(saveTimer); // the batch below carries this state, see saveDraft
-        document.activeElement?.blur(); // a keystroke from here on would reach neither
-        document.getElementById("send").disabled = true;
-        document.getElementById("status").textContent = "sending…";
+      // Everything Send posts, built apart from the posting so the browser selftest can read it.
+      async function buildBatch() {
         const eds = edits();
         const pages = [];
         for (const surface of SURFACES.values()) {
+          if (surface.doc) continue; // a draft's marks travel with its text page, below
           const ex = await exportSurface(surface);
           if (!ex) continue;
           pages.push({
@@ -2168,21 +2711,43 @@
           });
         }
         ITEMS.filter((i) => i.kind === "text").forEach((item) => {
+          // The words were read when the mark was drawn. A mark restored from a draft saved before
+          // that existed has none yet, and is read now.
+          const surface = SURFACES.get(`${item.id}#marks`);
+          const drawn = marks
+            .filter((m) => surface && m.item === surface.key)
+            .map((m) => {
+              const at = m.quote === undefined ? textUnder(surface, m) : m;
+              return {
+                id: `m_${m.id}`,
+                number: numberOf(m),
+                tool: m.tool,
+                quote: at.quote,
+                blocks: at.blocks,
+                ...(at.parts && { parts: at.parts }),
+                box: at.box,
+                note: m.note,
+              };
+            });
           const mine = comments.filter((c) => c.item === item.id);
           const myEdits = eds.filter((e) => e.item === item.id);
-          if (!mine.length && !myEdits.length) return;
+          if (!mine.length && !myEdits.length && !drawn.length) return;
           pages.push({
             kind: "text",
             item: item.id,
             name: item.name,
-            comments: mine.map((c) => ({
-              id: `c_${c.id}`,
-              number: numberOf(c),
-              quote: c.quote,
-              anchor: c.anchor,
-              block: c.block,
-              note: c.note,
-            })),
+            comments: [
+              ...mine.map((c) => ({
+                id: `c_${c.id}`,
+                number: numberOf(c),
+                quote: c.quote,
+                anchor: c.anchor,
+                block: c.block,
+                ...(c.blocks && { blocks: c.blocks, parts: c.parts }),
+                note: c.note,
+              })),
+              ...drawn,
+            ].sort((a, b) => a.number - b.number),
             edits: myEdits.map((e) => ({
               block: e.key,
               label: e.label,
@@ -2207,6 +2772,16 @@
             .filter(Boolean)
             .join("\n");
         }
+        return { pages, note };
+      }
+
+      document.getElementById("send").onclick = async () => {
+        sending = true;
+        clearTimeout(saveTimer); // the batch below carries this state, see saveDraft
+        document.activeElement?.blur(); // a keystroke from here on would reach neither
+        document.getElementById("send").disabled = true;
+        document.getElementById("status").textContent = "sending…";
+        const { pages, note } = await buildBatch();
         const n = pages.reduce(
           (s, p) => s + (p.comments || []).length + (p.edits || []).length,
           0,

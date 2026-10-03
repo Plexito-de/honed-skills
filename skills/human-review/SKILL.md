@@ -13,17 +13,17 @@ compatibility: >-
   PowerPoint deck still needs LibreOffice (`soffice`) to become a PDF first. Works offline.
   Agent-agnostic.
 metadata:
-  version: "1.2.0"
+  version: "1.3.0"
   changeSummary: >-
-    A PDF is now the PDF: pages are drawn to canvas at the screen's pixel ratio by a vendored
-    PDF.js, their text can be selected, copied, found with Ctrl+F and commented on like a Markdown
-    draft, and every crop is re-rendered from the file instead of cut from a 130 dpi raster. So
-    poppler and sips are no longer needed at all. Adds a contents list with page chips, feedback
-    counts and j/k/o keys, drawers and a viewport tag for a phone, and a Content-Security-Policy
-    with a per-response nonce. Fixes two staging defects: a PDF that shrank kept showing its old
-    pages, and `doc-summary.png` was attached as a page of `doc.pdf`. The batch gains fields and
-    loses none; a PDF page is now labelled "statement.pdf, page 2" rather than "statement-1.png",
-    and an unsent draft from 1.1 keeps its notes but marks them as orphaned.
+    A draft can now be reviewed like a picture and like a document at once. A selection may run
+    over several paragraphs: blocks become editable only once the caret is in one, so the browser
+    no longer clamps a selection to a single paragraph, and Shift+Arrow and Ctrl+Alt+M give the
+    keyboard the same reach. Circle, box, freehand and arrow now work on a draft; each shape is
+    read by its own outline, its words are taken when it is drawn, and it stays pinned to its
+    paragraph through edits above it. The Select tool is shown as Text whenever a draft or a PDF is
+    in the session. The batch gains fields and loses none: a multi-paragraph comment adds
+    `blocks` and `parts`, and a shape on a draft adds `tool` and `box` and carries an empty
+    `anchor`.
   isBreaking: "false"
 ---
 
@@ -51,7 +51,7 @@ skills/human-review/bin/review poll --session <id>               # blocks until 
 skills/human-review/bin/review poll --ack                        # clears the batch you handled
 skills/human-review/bin/review status                            # is a batch waiting
 skills/human-review/bin/review close                             # stop a review nobody sends
-skills/human-review/bin/review selftest [--browser]              # 42 offline cases, 49 more in Chrome
+skills/human-review/bin/review selftest [--browser]              # 51 offline cases, 119 more in Chrome (wide and phone)
 ```
 
 1. Write or render the draft.
@@ -70,8 +70,9 @@ skills/human-review/bin/review selftest [--browser]              # 42 offline ca
 | ------------------------------ | ------------------------------------------------- | -------------------------------------------------------------------------- |
 | An image or a PDF page         | circle, box, freehand or arrow, one note per mark | the picture with the marks rendered into it, plus one padded crop per mark |
 | A PDF page                     | select the words themselves, click Comment        | the same, plus the exact quote, its anchor and one rectangle per line      |
-| A Markdown, HTML or text draft | select any text, click Comment, type the note     | the quote with a prefix and suffix anchor, and the block it sits in        |
+| A Markdown, HTML or text draft | select any text, across paragraphs too, click Comment (or Ctrl+Alt+M), type the note | the quote with a prefix and suffix anchor, and the block it sits in. A selection over several paragraphs also lists them in `blocks` |
 | The same draft                 | type straight into it                             | a before and after per block                                               |
+| The same draft                 | circle, box, freehand or arrow, one note per mark | the `tool`, the marked words as `quote`, their block and a `box`. No crop, and an empty anchor |
 
 Every item lands in one numbered list. Their "2" is your "2", on a picture and in a paragraph alike.
 
@@ -90,6 +91,8 @@ so the list is also a map of where the feedback is.
 
 - `j` and `k` go to the next and previous stop, `o` shows and hides the list, `Esc` closes a drawer.
   None of them fires while the caret is in a note or in an editable block.
+- In a draft, Shift+Arrow carries a selection on past the end of a paragraph, and Ctrl+Alt+M
+  (Cmd+Option+M on a Mac) comments on it, so a comment over several paragraphs needs no mouse.
 - Inside the list: arrow keys, Home, End, Enter.
 - **No jump touches the browser history**, because a page may only close its own tab while that tab
   has one history entry, and Send closes the tab.
@@ -152,6 +155,27 @@ so the list is also a map of where the feedback is.
           "anchor": { "prefix": "…", "suffix": "…" },
           "block": "draft#4",
           "note": "cut this"
+        },
+        {
+          "number": 3,
+          "quote": "the last sentence of one paragraph\nThe first words of the next",
+          "anchor": { "prefix": "…", "suffix": "…" },
+          "block": "draft#5",
+          "blocks": ["draft#5", "draft#6"],
+          "parts": [
+            { "block": "draft#5", "quote": "the last sentence of one paragraph" },
+            { "block": "draft#6", "quote": "The first words of the next" }
+          ],
+          "note": "merge these"
+        },
+        {
+          "number": 4,
+          "tool": "ellipse",
+          "quote": "Second heading",
+          "anchor": { "prefix": "", "suffix": "" },
+          "block": "draft#7",
+          "box": { "x": 0.08, "y": 0.41, "w": 0.35, "h": 0.04 },
+          "note": "shorter"
         }
       ],
       "edits": [
@@ -175,6 +199,17 @@ so the list is also a map of where the feedback is.
 - **A mark with `"tool": "text"` is a selection, not a drawing.** It carries the exact `quote`, its
   `anchor` and one rectangle per line in `rects`, with `box` as their union. Use the quote to find
   the words in the source the PDF was made from, and read the crop to see them in place.
+- **A comment with `blocks` spans several paragraphs.** Read `parts`: one `{block, quote}` per
+  paragraph, in order. `quote` joins them with newlines for display only, and a code block can hold
+  newlines of its own, so do not split it back. The `prefix` comes from the first block and the
+  `suffix` from the last.
+- **A comment with a `tool` was drawn on a draft, not selected.** Its `quote` is the marked words as
+  the page showed them, from the first marked word to the last in each block, one line per block.
+  Its `anchor` is empty, because a shape has no exact character span, so the same phrase twice in
+  one block is ambiguous. `box` is where the shape sat, as fractions of the draft. An arrow quotes
+  the word at its head. An empty `quote` means the shape sat on no words; `block` still names the
+  block nearest to it. Over several paragraphs it has `blocks` and `parts` like a selection. A mark
+  is read when it is drawn, so later edits do not change its quote.
 - **`source` is the original file.** Edit that file. The copy in the session directory is a working
   copy, and a rewrite of it changes nothing.
 - **`edits_saved` is always false.** This tool never writes to their files. Apply `after`
