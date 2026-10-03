@@ -205,6 +205,19 @@ class ChangeResult:
 
     changed: int = 0
     already: int = 0
+    moved: int = 0
+    # reparent only: items it would not move, counted apart from `already` (a permission that is
+    # already gone), because "skipped on purpose" and "nothing left to do" need different reading.
+    skipped_filed: int = 0
+    skipped_folders: int = 0
+    # reparent only: items that were moved but whose permission is still there. The structure
+    # changed and the access did not, which is the one state a reader must be shown by id.
+    moved_not_revoked: list[str] = field(default_factory=list)
+    # reparent only: one entry per item it touched, with the parents and EVERY permission the item
+    # had before the move (approved grants included: a move drops all of them that were inherited),
+    # and whether the move happened. It is what an undo needs, so the caller writes it even when
+    # the run is interrupted.
+    ledger: list[dict[str, Any]] = field(default_factory=list)
     blocked_by_ancestor: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
@@ -910,6 +923,83 @@ def list_shared_drives() -> list[dict[str, Any]]:
     )
 
 
+def all_permissions(service: Any, file_id: str) -> list[dict[str, Any]]:
+    """Every permission on one item, across pages. The list embedded in files.get is not used for
+    a safety decision, because it is not documented as complete."""
+    out: list[dict[str, Any]] = []
+    token = None
+    while True:
+        page = (
+            service.permissions()
+            .list(
+                fileId=file_id,
+                fields=f"nextPageToken,{PERMISSION_FIELDS}",
+                supportsAllDrives=True,
+                pageToken=token,
+            )
+            .execute(num_retries=3)
+        )
+        out.extend(page.get("permissions") or [])
+        token = page.get("nextPageToken")
+        if not token:
+            return out
+
+
+def describe_file(file_id: str) -> dict[str, Any]:
+    """Canonical id, name, type, drive, trash state, owners and ALL permissions of one item, for a
+    guard run BEFORE a mutation: can items be moved into it without anybody gaining access?"""
+    service = _service()
+    info = (
+        service.files()
+        .get(
+            fileId=file_id,
+            fields="id,name,mimeType,driveId,trashed,owners(emailAddress)",
+            supportsAllDrives=True,
+        )
+        .execute(num_retries=3)
+    )
+    info["permissions"] = all_permissions(service, info.get("id") or file_id)
+    return info
+
+
+def destination_problem(dest: dict[str, Any], owner: str) -> str | None:
+    """Why `dest` is not a safe folder to re-parent into, or None when it is.
+
+    A moved item INHERITS every permission on its new parent, and the permissions Drive lists on a
+    folder include the ones it inherits from its own ancestors. So the only safe destination is a
+    My Drive folder this account owns that nobody else can see. Anything else turns a verb meant
+    to remove access into one that grants it.
+    """
+    name = dest.get("name") or dest.get("id") or "?"
+    if dest.get("mimeType") != FOLDER_MIME_TYPE:
+        return f"{name} is not a folder ({dest.get('mimeType')})"
+    if dest.get("trashed"):
+        return f"{name} is in the trash"
+    if dest.get("driveId"):
+        return (
+            f"{name} is in a shared drive, where every drive member gets access to what moves in. "
+            "Use a private folder in My Drive"
+        )
+    if not any(o.get("emailAddress") == owner for o in dest.get("owners") or []):
+        return f"{name} is not owned by {owner}. Use a folder you own"
+    permissions = dest.get("permissions") or []
+    # An owned folder always lists its owner, so an empty or ownerless list means Drive did not
+    # tell us who can see it, and "nobody" would be a guess in the direction that costs.
+    if not any(p.get("role") == "owner" and p.get("emailAddress") == owner for p in permissions):
+        return f"{name}: Drive did not return who can see it, so it cannot be proven private"
+    others = [
+        p.get("emailAddress") or p.get("domain") or p.get("type") or "?"
+        for p in permissions
+        if not (p.get("role") == "owner" and p.get("emailAddress") == owner)
+    ]
+    if others:
+        return (
+            f"{name} is shared ({', '.join(sorted(set(others)))}), so every moved item would gain "
+            "that access. Use a private folder nobody else can see"
+        )
+    return None
+
+
 def whoami_email() -> str:
     """The address the credential actually acts as.
 
@@ -1040,6 +1130,284 @@ def revoke(
     return result
 
 
+def _rate_limited(exc: BaseException) -> bool:
+    """Drive's own reasons (rateLimitExceeded, userRateLimitExceeded) or a bare 429."""
+    status = getattr(getattr(exc, "resp", None), "status", None)
+    return status == 429 or "ratelimitexceeded" in str(exc).lower()
+
+
+def reparent_and_revoke(
+    findings: Iterable[Finding],
+    *,
+    destination: str,
+    dry_run: bool = True,
+    orphans_only: bool = True,
+    include_folders: bool = False,
+    pause_every: int = 50,
+    pause_seconds: float = 1.0,
+    check_every: int = 10,
+    report: Callable[[str], None] = print,
+    check_destination: Callable[[], str | None] | None = None,
+    on_ledger_change: Callable[[ChangeResult], None] | None = None,
+    result: ChangeResult | None = None,
+    service: Any = None,
+    http_error: type[BaseException] | None = None,
+) -> ChangeResult:
+    """Free a grant that `revoke` cannot remove, by giving its item a parent this account owns.
+
+    WHY THIS EXISTS. A Drive permission can outlive the folder it was granted on. The item then
+    has no parent, and `permissions.delete` returns 403 `cannotDeletePermission` at every level.
+    Re-parenting breaks the inheritance chain, which is what should make the permission
+    removable.
+
+    EACH GRANT IS TRIED WITH A PLAIN DELETE FIRST. Only a delete Drive refuses with
+    `cannotDeletePermission` leads to a move, so an item whose grant can simply be removed is
+    never reorganised. Then: move, VERIFY the move, delete again, and READ THE PERMISSIONS BACK.
+    Only a grant that is absent from that read-back counts as freed, whatever the delete answered.
+
+    A MOVE CAN REMOVE EVERY INHERITED GRANT, NOT ONLY THE ONE IN SCOPE: approved ones too. So before
+    each move the item's parents and full permission list go into `result.ledger`, which is what
+    an undo needs. `on_ledger_change` is called after every ledger change, so the caller can write
+    it ahead of the next step; a move is recorded as "unknown" while its request is in flight.
+
+    THE DESTINATION MUST BE CHECKED BY THE CALLER FIRST (`destination_problem()`), with
+    `destination` the CANONICAL id from that check. A moved item inherits every grant on its new
+    parent. `check_destination` re-runs the check before the first move and every `check_every`
+    moves after it, so a destination that becomes shared stops the run.
+
+    `orphans_only` (default True) skips an item that has a parent: it is filed on purpose. An item
+    in a shared drive is never moved. `include_folders` (default False) is needed to move a
+    folder, which takes everything inside it along. Every Drive call is paced (`pause_every`), and
+    a rate limit that outlasts the client's retries stops the run.
+
+    A DRY RUN IMPORTS NOTHING FROM GOOGLE, matching `revoke`, so it runs on a machine with no venv.
+    It applies the skip rules from the listing, where an item at My Drive root also reads as
+    parentless, and it cannot know which deletes Drive would refuse, so its count is an upper
+    bound. `service` and `http_error` let the self-test drive the apply path with a fake.
+    """
+    import time  # noqa: PLC0415
+
+    if not dry_run:
+        service = service if service is not None else _service()
+        http_error = http_error if http_error is not None else _http_error_class()
+
+    def status_of(exc: BaseException) -> int | None:
+        return getattr(getattr(exc, "resp", None), "status", None)
+
+    def saved() -> None:
+        if on_ledger_change is not None:
+            on_ledger_change(result)
+
+    result = result if result is not None else ChangeResult()
+    moved_files: set[str] = set()
+    skipped_files: set[str] = set()  # skipped on purpose: their grants stay, counted once per item
+    failed_files: set[str] = set()   # a step failed: every further grant on them is reported
+    attempts = 0
+    processed = 0
+
+    for finding in findings:
+        where = f"{finding.file_id} ({finding.name})"
+        if finding.file_id in skipped_files:
+            continue
+        if finding.file_id in failed_files:
+            result.errors.append(f"{where}: grant {finding.permission_id} not attempted, an "
+                                 "earlier step on this item failed")
+            continue
+        if finding.is_folder and not include_folders:
+            result.skipped_folders += 1
+            skipped_files.add(finding.file_id)
+            continue
+        if dry_run:
+            if orphans_only and finding.parents:
+                result.skipped_filed += 1
+                skipped_files.add(finding.file_id)
+                continue
+            report(
+                f"  [would try, then re-parent + revoke] {finding.principal:24s} "
+                f"{finding.role:8s} {finding.name}"
+            )
+            result.changed += 1
+            continue
+
+        processed += 1
+        if processed > 1 and processed % pause_every == 1:
+            report(
+                f"  … {processed - 1} processed, {result.moved} moved, {result.changed} freed, "
+                f"{len(result.moved_not_revoked)} moved but not revoked, "
+                f"{len(result.errors)} error(s)"
+            )
+            time.sleep(pause_seconds)
+
+        if finding.file_id not in moved_files:
+            # 1. The plain delete. Most grants go here, and nothing moves.
+            try:
+                service.permissions().delete(
+                    fileId=finding.file_id, permissionId=finding.permission_id,
+                    supportsAllDrives=True,
+                ).execute(num_retries=3)
+                result.changed += 1
+                continue
+            except http_error as exc:
+                if status_of(exc) == 404 and "file not found" not in str(exc).lower():
+                    result.already += 1
+                    continue
+                if _rate_limited(exc):
+                    result.errors.append(f"run stopped at {where}: Drive's rate limit "
+                                         "outlasted the retries")
+                    return result
+                if _http_reason(exc) != "cannotDeletePermission":
+                    if reason := _http_reason(exc):
+                        result.blocked_by_ancestor.append(f"{reason}: {where}")
+                    else:
+                        result.errors.append(f"{where}: {exc}")
+                    continue
+            # 2. Refused as orphaned. Read the item as it really is, not as the listing said.
+            try:
+                current = (
+                    service.files()
+                    .get(fileId=finding.file_id, fields="id,parents,driveId",
+                         supportsAllDrives=True)
+                    .execute(num_retries=3)
+                )
+                before = all_permissions(service, finding.file_id)
+            except http_error as exc:
+                result.errors.append(f"{where}: could not read the item: {exc}")
+                failed_files.add(finding.file_id)
+                if _rate_limited(exc):
+                    result.errors.append("run stopped: Drive's rate limit outlasted the retries")
+                    return result
+                continue
+            parents = current.get("parents") or []
+            if current.get("driveId") or (orphans_only and parents):
+                result.skipped_filed += 1
+                skipped_files.add(finding.file_id)
+                continue
+            # 3. The destination, before the first move and every check_every moves after it.
+            if attempts % check_every == 0 and check_destination is not None:
+                if problem := check_destination():
+                    result.errors.append(
+                        f"run stopped before {where}: destination {problem}. Items moved before "
+                        "this point are in the ledger; move them out of the destination first"
+                    )
+                    return result
+            attempts += 1
+            entry: dict[str, Any] = {
+                "file_id": finding.file_id, "name": finding.name, "parents_before": parents,
+                "permissions_before": before,
+                "moved": "unknown: the move request was sent and has not returned",
+            }
+            result.ledger.append(entry)
+            saved()
+            # 4. Move, once per file. Any failure leaves the move "unknown", never "no".
+            try:
+                service.files().update(
+                    fileId=finding.file_id, addParents=destination,
+                    removeParents=",".join(parents) if parents else None,
+                    fields="id,parents", supportsAllDrives=True,
+                ).execute(num_retries=3)
+            except http_error as exc:
+                entry["moved"] = "unknown: the request failed, a retry may still have applied it"
+                saved()
+                result.errors.append(f"{where}: the move request failed, check the item: {exc}")
+                failed_files.add(finding.file_id)
+                if _rate_limited(exc):
+                    result.errors.append("run stopped: Drive's rate limit outlasted the retries")
+                    return result
+                continue
+            # 5. Verify. An unproven move is never followed by a revoke.
+            try:
+                after = (
+                    service.files()
+                    .get(fileId=finding.file_id, fields="id,parents", supportsAllDrives=True)
+                    .execute(num_retries=3)
+                )
+            except Exception as exc:  # noqa: BLE001 - any failure here leaves the move unproven
+                entry["moved"] = "unknown: the move could not be verified"
+                saved()
+                result.moved_not_revoked.append(f"{where}: move not verified ({exc})")
+                failed_files.add(finding.file_id)
+                if _rate_limited(exc):
+                    result.errors.append("run stopped: Drive's rate limit outlasted the retries")
+                    return result
+                continue
+            if destination not in (after.get("parents") or []):
+                entry["moved"] = f"no: parents are {after.get('parents')}"
+                saved()
+                result.errors.append(
+                    f"{where}: move did not take, parents are {after.get('parents')}, "
+                    "so the permission was left alone"
+                )
+                failed_files.add(finding.file_id)
+                continue
+            entry["moved"] = True
+            saved()
+            moved_files.add(finding.file_id)
+            result.moved += 1
+
+        # 6. The delete after the move, then a read-back: only an absent grant counts as freed.
+        try:
+            service.permissions().delete(
+                fileId=finding.file_id, permissionId=finding.permission_id,
+                supportsAllDrives=True,
+            ).execute(num_retries=3)
+        except Exception as exc:  # noqa: BLE001 - the item has moved; every failure must be shown
+            if not (http_error is not None and isinstance(exc, http_error) and status_of(exc) == 404):
+                result.moved_not_revoked.append(f"{where}: moved, but the revoke failed: {exc}")
+                if _rate_limited(exc):
+                    result.errors.append("run stopped: Drive's rate limit outlasted the retries")
+                    return result
+                continue
+        try:
+            still = any(
+                p.get("id") == finding.permission_id
+                for p in all_permissions(service, finding.file_id)
+            )
+        except Exception as exc:  # noqa: BLE001
+            result.moved_not_revoked.append(f"{where}: moved, revoke not confirmed ({exc})")
+            if _rate_limited(exc):
+                result.errors.append("run stopped: Drive's rate limit outlasted the retries")
+                return result
+            continue
+        if still:
+            result.moved_not_revoked.append(f"{where}: moved, but the grant is still listed")
+        else:
+            result.changed += 1
+
+    return result
+
+
+def write_ledger(result: ChangeResult, path: Path, destination: str) -> Path:
+    """Write what a reparent run did, item by item, so it can be undone.
+
+    Rewritten in full after every change through a temporary file and an atomic rename, so the
+    file on disk is always a complete earlier or later state, never a half-written one.
+    """
+    payload = {
+        "written": datetime.now().isoformat(timespec="seconds"),
+        "destination": destination,
+        "note": "One entry per item this run read before moving. To undo a move: "
+        f"files.update(fileId, addParents=<parents_before>, removeParents={destination}). An "
+        "item with no parents_before was orphaned and has nowhere to return to. permissions_before "
+        "lists EVERY grant the item had, approved ones included, with permissionDetails saying "
+        "which were inherited; a move can drop all of those, so re-create any you still want with "
+        "permissions.create (sendNotificationEmail=false). A `moved` value starting with "
+        "'unknown' means: check that item by hand.",
+        "moved": result.moved,
+        "moved_not_revoked": result.moved_not_revoked,
+        "items": result.ledger,
+    }
+    _private_dir(path.parent)
+    tmp = path.with_name(path.name + ".tmp")
+    # 0600 from the first byte: the file lists who can see what.
+    with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w",
+                   encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=2, ensure_ascii=False)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+    return path
+
+
 def snapshot_path(directory: Path, now: datetime | None = None) -> Path:
     """A path that cannot collide with another run's.
 
@@ -1053,17 +1421,28 @@ def snapshot_path(directory: Path, now: datetime | None = None) -> Path:
     return directory / f"drive-acl-snapshot-{stamp}-{os.getpid()}.json"
 
 
-def write_snapshot(findings: Iterable[Finding], path: Path) -> Path:
+def _private_dir(directory: Path) -> None:
+    """Create `directory` as 0700, and tighten it if it already exists and is ours: mkdir's mode
+    applies only to a directory it creates, and an older install left this one 0755."""
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if directory.stat().st_uid == os.getuid():
+        os.chmod(directory, 0o700)
+
+
+def write_snapshot(findings: Iterable[Finding], path: Path, *, moved_to: str | None = None) -> Path:
     """Record every permission about to be removed, so all of it can be re-added.
 
     This is what makes a several-thousand-file revoke a decision rather than a gamble: the ids,
     permission ids, the principals and the roles are all here, and restoring one row is a single
-    `permissions.create`.
+    `permissions.create`. Each row also carries the item's parents AS LISTED, before anything ran.
+    For a re-parent (`moved_to`), the run ledger written by `write_ledger` is the record of what
+    each item really had and whether it moved; this file only says what was in scope.
     """
     rows = [
         {
             "file_id": f.file_id,
             "name": f.name,
+            "parents": list(f.parents),
             "permission_id": f.permission_id,
             "type": f.permission_type,
             "role": f.role,
@@ -1084,10 +1463,19 @@ def write_snapshot(findings: Iterable[Finding], path: Path) -> Path:
         "count": len(rows),
         "permissions": rows,
     }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # "x" so a collision RAISES instead of overwriting somebody's only copy of an ACL. The caller
-    # aborts rather than deleting permissions it can no longer restore, which is the right trade.
-    with path.open("x", encoding="utf-8") as fh:
+    if moved_to:
+        payload["moved_to"] = moved_to
+        payload["move_note"] = (
+            f"These permissions were IN SCOPE for a re-parent into {moved_to}, written before the "
+            "run. Which items moved, the parents they really had and every grant the move removed "
+            "are in the run ledger written next to this file (*-ledger.json)."
+        )
+    _private_dir(path.parent)
+    # O_EXCL so a collision RAISES instead of overwriting the only copy of an ACL (the caller then
+    # aborts rather than deleting permissions it can no longer restore), and 0600 because the file
+    # lists who can see what.
+    with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w",
+                   encoding="utf-8") as fh:
         json.dump(payload, fh, indent=2, ensure_ascii=False)
         fh.flush()
         os.fsync(fh.fileno())
@@ -1372,6 +1760,301 @@ def selftest() -> int:
         )
     )
 
+    # reparent_and_revoke: the dry run must count without importing anything from Google, which is
+    # what keeps it runnable on a machine with no venv. A dry run that needed the service would
+    # fail here with ImportError rather than returning a count.
+    rp_findings = classify([item(id="orph", parents=[], permissions=[found])], Policy(), me)
+    cases.append(
+        (
+            "reparent dry run counts every finding",
+            reparent_and_revoke(rp_findings, destination="dest", dry_run=True, report=lambda _: None).changed,
+            len(rp_findings),
+        )
+    )
+    # And it must not silently report success on an empty scope, because "0 freed" and "nothing was
+    # in scope" are different answers and only one of them means the work is done.
+    cases.append(
+        (
+            "reparent dry run on nothing changes nothing",
+            reparent_and_revoke([], destination="dest", dry_run=True, report=lambda _: None).changed,
+            0,
+        )
+    )
+    # The dry run applies the same skip rules as apply, per ITEM, or it promises what apply will not.
+    other = {"id": "p2", "type": "user", "role": "writer", "emailAddress": "x@example.com"}
+    filed = classify([item(id="filed", parents=["p1"], permissions=[found, other])], Policy(), me)
+    a_folder = classify(
+        [item(id="dir", parents=[], mimeType=FOLDER_MIME_TYPE, permissions=[found])], Policy(), me
+    )
+    dry = reparent_and_revoke(
+        rp_findings + filed + a_folder, destination="dest", dry_run=True, report=lambda _: None
+    )
+    cases.append(
+        (
+            "reparent dry run skips filed items and folders, counted once per item",
+            (dry.changed, dry.skipped_filed, dry.skipped_folders),
+            (len(rp_findings), 1, 1),
+        )
+    )
+
+    # destination_problem: the only safe destination is a private My Drive folder you own.
+    def dest(**kw: Any) -> dict[str, Any]:
+        base: dict[str, Any] = {
+            "id": "d",
+            "name": "Recovered",
+            "mimeType": FOLDER_MIME_TYPE,
+            "owners": [{"emailAddress": me}],
+            "permissions": [{"type": "user", "role": "owner", "emailAddress": me}],
+        }
+        base.update(kw)
+        return base
+
+    shared_perms = [
+        {"type": "user", "role": "owner", "emailAddress": me},
+        {"type": "domain", "role": "reader", "domain": "example.com"},
+    ]
+    cases.append(("private folder you own is a safe destination", destination_problem(dest(), me), None))
+    for label, bad in (
+        ("a shared destination is refused", dest(permissions=shared_perms)),
+        ("an anyone-with-link destination is refused", dest(permissions=[*dest()["permissions"], link])),
+        ("a shared-drive destination is refused", dest(driveId="0Axyz")),
+        ("a trashed destination is refused", dest(trashed=True)),
+        ("a destination owned by someone else is refused", dest(owners=[{"emailAddress": "x@example.com"}])),
+        ("a file as destination is refused", dest(mimeType="image/png")),
+        ("a destination whose permissions Drive did not return is refused", dest(permissions=[])),
+    ):
+        cases.append((label, destination_problem(bad, me) is not None, True))
+
+    # The apply path, against a fake Drive that models inheritance the way Drive behaves: an
+    # inherited grant on a parentless item refuses deletion (cannotDeletePermission), one under a
+    # live parent refuses too (cannotModifyInheritedPermission), and a move drops every inherited
+    # grant, so a later delete of one answers 404.
+    class FakeHttpError(Exception):
+        def __init__(self, status: int, reason: str = "") -> None:
+            super().__init__(f"HTTP {status} {reason}".strip())
+            self.resp = type("Resp", (), {"status": status})()
+
+    class Call:
+        def __init__(self, fn: Callable[[], Any]) -> None:
+            self.fn = fn
+
+        def execute(self, num_retries: int = 0) -> Any:
+            return self.fn()
+
+    class FakeDrive:
+        def __init__(self, items: dict[str, dict[str, Any]], move_ok: bool = True,
+                     fail_after_move: tuple[str, ...] = (), raise_on_update: bool = False,
+                     sticky: tuple[str, ...] = (), rate_limited: bool = False,
+                     rate_limited_on_update: bool = False) -> None:
+            self.items, self.move_ok = items, move_ok
+            self.fail_after_move, self.raise_on_update = fail_after_move, raise_on_update
+            self.sticky, self.rate_limited = sticky, rate_limited
+            self.rate_limited_on_update = rate_limited_on_update
+            self.updates: list[str] = []
+
+        def files(self) -> FakeDrive:
+            return self
+
+        def permissions(self) -> FakeDrive:
+            return self
+
+        def get(self, fileId: str, **_: Any) -> Call:
+            it = self.items[fileId]
+            return Call(lambda: {"id": fileId, "parents": list(it["parents"])})
+
+        def list(self, fileId: str, **_: Any) -> Call:
+            perms = self.items[fileId]["perms"]
+            return Call(lambda: {"permissions": [
+                {"id": p, "permissionDetails": [{"inherited": i}]} for p, i in perms.items()
+            ]})
+
+        def update(self, fileId: str, addParents: str, **_: Any) -> Call:
+            def run() -> dict[str, Any]:
+                if self.raise_on_update:
+                    raise RuntimeError("connection reset")
+                if self.rate_limited_on_update:
+                    raise FakeHttpError(403, "userRateLimitExceeded")
+                self.updates.append(fileId)
+                it = self.items[fileId]
+                if self.move_ok:
+                    it["parents"] = [addParents]
+                    it["perms"] = {p: i for p, i in it["perms"].items()
+                                   if not i or p in self.sticky}
+                return {}
+            return Call(run)
+
+        def delete(self, fileId: str, permissionId: str, **_: Any) -> Call:
+            def run() -> dict[str, Any]:
+                it = self.items[fileId]
+                if self.rate_limited:
+                    raise FakeHttpError(429)
+                if permissionId in self.sticky and "dest" in it["parents"]:
+                    return {}  # answers success, yet the grant stays: only a read-back sees it
+                if permissionId in self.fail_after_move and "dest" in it["parents"]:
+                    raise FakeHttpError(500)
+                if permissionId not in it["perms"]:
+                    raise FakeHttpError(404)
+                if it["perms"][permissionId]:
+                    raise FakeHttpError(403, "cannotModifyInheritedPermission" if it["parents"]
+                                        else "cannotDeletePermission")
+                del it["perms"][permissionId]
+                return {}
+            return Call(run)
+
+    def orphan(**perms: bool) -> dict[str, dict[str, Any]]:
+        return {"orph": {"parents": [], "perms": dict(perms)}}
+
+    two_grants = classify([item(id="orph", parents=[], permissions=[found, other])], Policy(), me)
+
+    def apply(drive: FakeDrive, findings: list[Finding], **kw: Any) -> ChangeResult:
+        return reparent_and_revoke(
+            findings, destination="dest", dry_run=False, report=lambda _: None,
+            service=drive, http_error=FakeHttpError, **kw,
+        )
+
+    drive = FakeDrive(orphan(anyone=False))
+    done = apply(drive, rp_findings)
+    cases.append(
+        ("a grant a plain delete removes is never moved", (done.changed, drive.updates), (1, []))
+    )
+    drive = FakeDrive(orphan())
+    done = apply(drive, rp_findings)
+    cases.append(
+        (
+            "a grant that is already gone counts as already, with no move and no error",
+            (done.already, done.errors, drive.updates),
+            (1, [], []),
+        )
+    )
+    drive = FakeDrive(orphan(anyone=True, p2=True, appr=True))
+    writes: list[int] = []
+    moved_run = done = apply(drive, two_grants, on_ledger_change=lambda r: writes.append(1))
+    cases.append(
+        (
+            "two refused grants on one orphan: one move, both freed, every grant in the ledger",
+            (done.moved, done.changed, drive.updates, len(done.ledger[0]["permissions_before"])),
+            (1, 2, ["orph"], 3),
+        )
+    )
+    cases.append(("the ledger is written ahead of the move and after it", len(writes) >= 2, True))
+    drive = FakeDrive(orphan(anyone=True), sticky=("anyone",))
+    done = apply(drive, rp_findings)
+    cases.append(
+        (
+            "a grant still listed after the revoke is moved-not-revoked, never freed",
+            (done.changed, len(done.moved_not_revoked)),
+            (0, 1),
+        )
+    )
+    drive = FakeDrive(orphan(anyone=True, p2=True), rate_limited=True)
+    done = apply(drive, two_grants)
+    cases.append(
+        ("a rate limit on a plain delete stops the run", (done.changed, len(done.errors)), (0, 1))
+    )
+    two_orphans = {f"o{n}": {"parents": [], "perms": {"anyone": True}} for n in range(2)}
+    queued = [
+        f for i in two_orphans
+        for f in classify([item(id=i, parents=[], permissions=[found])], Policy(), me)
+    ]
+    drive = FakeDrive(two_orphans, rate_limited_on_update=True)
+    done = apply(drive, queued)
+    cases.append(
+        (
+            "a rate limit on a move stops the run, and the move stays unknown in the ledger",
+            (len(done.ledger), str(done.ledger[0]["moved"]).startswith("unknown")),
+            (1, True),
+        )
+    )
+    # The scan path reads permissions.list with this constant, so it must stay a wrapped field list;
+    # a bare one returns no `permissions` key and every shared-drive ACL reads as empty.
+    cases.append(
+        ("PERMISSION_FIELDS stays a wrapped permissions(...) list", PERMISSION_FIELDS.startswith("permissions("), True)
+    )
+    drive = FakeDrive({"filed": {"parents": ["p1"], "perms": {"anyone": True, "p2": True}}})
+    done = apply(drive, filed)
+    cases.append(
+        (
+            "a grant inherited from a LIVE folder is reported, never moved",
+            (len(done.blocked_by_ancestor), drive.updates),
+            (2, []),
+        )
+    )
+    drive = FakeDrive(orphan(anyone=True, p2=True), move_ok=False)
+    done = apply(drive, two_grants)
+    cases.append(
+        (
+            "a move that does not take revokes nothing, and the next grant is reported, not tried",
+            (done.changed, drive.updates, len(done.errors)),
+            (0, ["orph"], 2),
+        )
+    )
+    drive = FakeDrive(orphan(anyone=True), fail_after_move=("anyone",))
+    done = apply(drive, rp_findings)
+    cases.append(
+        (
+            "a failed revoke after a move is reported as moved-not-revoked",
+            (done.moved, done.changed, len(done.moved_not_revoked)),
+            (1, 0, 1),
+        )
+    )
+    drive = FakeDrive(orphan(anyone=True))
+    done = apply(drive, rp_findings, check_destination=lambda: "became shared")
+    cases.append(
+        (
+            "a destination that fails its check stops the run before the first move",
+            (drive.updates, len(done.errors), len(done.ledger)),
+            ([], 1, 0),
+        )
+    )
+    checks: list[int] = []
+    many = {f"o{n}": {"parents": [], "perms": {"anyone": True}} for n in range(3)}
+    many["f1"] = {"parents": ["p1"], "perms": {"anyone": True}}
+    mixed = [
+        f for i in ("o0", "f1", "o1", "o2")
+        for f in classify([item(id=i, parents=many[i]["parents"], permissions=[found])], Policy(), me)
+    ]
+    apply(FakeDrive(many), mixed, orphans_only=False, check_every=2, pause_seconds=0,
+          check_destination=lambda: checks.append(1) and None)
+    cases.append(("the destination is re-checked per moves, whatever is skipped between", len(checks), 2))
+    interrupted = ChangeResult()
+    try:
+        apply(FakeDrive(orphan(anyone=True), raise_on_update=True), rp_findings, result=interrupted)
+    except RuntimeError:
+        pass
+    cases.append(
+        (
+            "an interrupted move is in the caller's ledger as unknown, never as not moved",
+            (len(interrupted.ledger), str(interrupted.ledger[0]["moved"]).startswith("unknown")),
+            (1, True),
+        )
+    )
+
+    # What an undo needs reaches disk.
+    import tempfile  # noqa: PLC0415
+
+    with tempfile.TemporaryDirectory() as tmp:
+        snap = write_snapshot(filed, Path(tmp) / "s.json", moved_to="dest")
+        data = json.loads(snap.read_text(encoding="utf-8"))
+        led = write_ledger(moved_run, Path(tmp) / "s-ledger.json", "dest")
+        write_ledger(moved_run, led, "dest")  # rewritten in place, as after every change
+        ledger = json.loads(led.read_text(encoding="utf-8"))
+        loose = Path(tmp) / "older"
+        loose.mkdir(mode=0o755)
+        write_ledger(moved_run, loose / "l.json", "dest")
+        modes = (snap.stat().st_mode & 0o777, led.stat().st_mode & 0o777,
+                 loose.stat().st_mode & 0o777)
+    cases.append(
+        ("snapshot, ledger and an older looser directory end owner-only", modes, (0o600, 0o600, 0o700))
+    )
+    cases.append(
+        (
+            "the snapshot names the destination and the ledger records parents and grants",
+            (data["moved_to"], ledger["destination"], ledger["items"][0]["parents_before"],
+             len(ledger["items"][0]["permissions_before"])),
+            ("dest", "dest", [], 3),
+        )
+    )
+
     # The credentials command: it must return the key it printed, and every failure must exit
     # WITHOUT the output in the message, because that output is a private key.
     def exit_text(fn: Callable[[], Any]) -> str | None:
@@ -1478,10 +2161,15 @@ __all__ = [
     "policy_candidates",
     "policy_from_dict",
     "render",
+    "all_permissions",
+    "describe_file",
+    "destination_problem",
+    "reparent_and_revoke",
     "revoke",
     "selftest",
     "set_service_factory",
     "snapshot_path",
     "whoami_email",
+    "write_ledger",
     "write_snapshot",
 ]

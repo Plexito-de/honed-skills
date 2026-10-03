@@ -18,12 +18,16 @@ USAGE
   drive-audit folder <FOLDER_ID>        # one folder and its direct children
   drive-audit revoke --under <ID>       # DRY RUN by default: prints what it would remove
   drive-audit revoke --under <ID> --apply    # writes a restorable snapshot, then removes
+  drive-audit downgrade --principal <EMAIL> --to reader   # keep access, drop write
+  drive-audit reparent --principal <EMAIL> --into <ID>    # what revoke cannot remove: move, revoke
   drive-audit policy                    # where the policy file is looked for, and what loaded
   drive-audit --selftest                # offline, no credentials, no Google libraries
 
 EXIT CODES
   0  nothing unapproved
   1  unapproved shares found, or nothing could be scanned (an empty pass is a failure, not a pass)
+  revoke, downgrade and reparent: 1 on any real error. reparent also exits 1 when a moved item
+  kept its grant, or when nothing in scope was freed and nothing was already gone.
 
 AUTH
   A command that prints a service-account key in $DRIVE_AUDIT_CREDENTIALS_COMMAND, or a key file in
@@ -100,8 +104,12 @@ def _need_google() -> None:
         )
 
 
-def _report_change(result: gs.ChangeResult, verb: str) -> int:
-    """Print the four outcomes apart, and let the exit code follow only the real ones."""
+def _report_change(result: gs.ChangeResult, verb: str, *, suggest_reparent: bool = False) -> int:
+    """Print the four outcomes apart, and let the exit code follow only the real ones.
+
+    `suggest_reparent` is for `revoke` only: reparent REMOVES a grant, so pointing a `downgrade`
+    (which keeps access) at it would steer the reader into a stronger action than they chose.
+    """
     print(
         f"\n{result.changed} permission(s) {verb}; {result.already} needed no change; "
         f"{len(result.blocked_by_ancestor)} are decided by an ancestor folder; "
@@ -130,6 +138,11 @@ def _report_change(result: gs.ChangeResult, verb: str) -> int:
                 "  control, which breaks the inheritance. That reorganises a Drive, so it is a\n"
                 "  decision rather than a cleanup step. Confirm with:  drive-audit folder <ID>"
             )
+            if suggest_reparent:
+                print(
+                    "  Once decided, preview the move with the same scope flags:\n"
+                    "      drive-audit reparent <same scope> --into <PRIVATE_FOLDER_YOU_OWN>"
+                )
             for line in orphaned[:3]:
                 print(f"      {line}")
     for line in result.errors[:20]:
@@ -390,7 +403,7 @@ def cmd_revoke(args) -> int:
     print("every removed permission can be re-created from that file.\n")
 
     result = gs.revoke(findings, dry_run=False)
-    return _report_change(result, "removed")
+    return _report_change(result, "removed", suggest_reparent=True)
 
 
 def cmd_downgrade(args) -> int:
@@ -428,6 +441,119 @@ def cmd_downgrade(args) -> int:
 
     result = gs.change_role(to_change, args.to, dry_run=False)
     return _report_change(result, f"set to '{args.to}'")
+
+
+def cmd_reparent(args) -> int:
+    """Free grants `revoke` cannot remove (cannotDeletePermission on an orphaned item).
+
+    Each grant is tried with a plain delete first; only a refused one leads to a move into a
+    private folder you own. Run `revoke` first and use this for what it refused.
+    """
+    _need_google()
+    owner = gs.whoami_email()
+    policy = gs.load_policy(Path(args.policy) if args.policy else None)
+    findings, scope, scanned = _select(args, owner, policy)
+
+    eligible = [
+        f for f in findings
+        if (args.include_folders or not f.is_folder) and (args.include_filed or not f.parents)
+    ]
+    print(f"scope:    {scope}")
+    print(f"scanned:  {scanned} item(s)")
+    print(
+        f"target:   {len(eligible)} permission(s) on items eligible to move "
+        f"({len(findings) - len(eligible)} more in scope are on filed items or folders)\n"
+    )
+    if not eligible:
+        print("nothing to re-parent: no unapproved permission on an eligible item in this scope")
+        return 0
+
+    # Checked in the dry run too, so a wrong --into shows up before anyone decides on --apply. A
+    # moved item inherits every grant on its new parent: a shared destination would ADD access.
+    # One read gives both the verdict and the CANONICAL id, so an alias such as `root` can never
+    # pass the guard and then fail the move verification, which compares against the ids Drive returns.
+    def check(folder: str) -> tuple[str | None, str]:
+        try:
+            info = gs.describe_file(folder)
+        except Exception as exc:  # noqa: BLE001 - an unreadable destination is never safe
+            return f"cannot be read ({type(exc).__name__})", folder
+        return gs.destination_problem(info, owner), info.get("id") or folder
+
+    problem, into = check(args.into)
+    if problem:
+        raise SystemExit(f"Refusing: --into {args.into}: {problem}.")
+    print(f"destination verified: {into}, a private folder owned by {owner}")
+    print("  Keep it private for good: sharing it later shares everything moved into it.\n")
+
+    folders = sum(1 for f in eligible if f.is_folder)
+    if folders:
+        print(f"note: {folders} permission(s) are on FOLDERS; moving one moves everything in it\n")
+    if args.apply and args.max_changes and len(eligible) > args.max_changes:
+        raise SystemExit(
+            f"Refusing: {len(eligible)} permission(s) is above the --max-changes ceiling of "
+            f"{args.max_changes}.\n"
+            "  This verb MOVES FILES, so an unexpected number is more expensive here than\n"
+            "  anywhere else in this tool. Re-read the scope before raising the ceiling."
+        )
+
+    run = dict(
+        destination=into,
+        orphans_only=not args.include_filed,
+        include_folders=args.include_folders,
+    )
+    if not args.apply:
+        dry = gs.reparent_and_revoke(eligible, dry_run=True, **run)
+        print(
+            f"\nDRY RUN: at most {dry.changed} permission(s) would be freed. Each is tried with a\n"
+            "  plain delete first; only the ones Drive refuses as orphaned move their item into\n"
+            f"  {into}. A move can drop EVERY grant the item inherited, approved ones included;\n"
+            "  the run ledger records them all first. Re-run with --apply to do it."
+        )
+        return 0
+
+    snapshot = gs.write_snapshot(eligible, gs.snapshot_path(SNAPSHOT_DIR), moved_to=into)
+    ledger_path = snapshot.with_name(snapshot.stem + "-ledger.json")
+    print(f"snapshot written BEFORE any change: {snapshot}")
+    print(f"run ledger, rewritten before every move and after each outcome: {ledger_path}\n")
+
+    result = gs.ChangeResult()
+
+    def save(current: gs.ChangeResult) -> None:
+        gs.write_ledger(current, ledger_path, into)
+
+    try:
+        gs.reparent_and_revoke(
+            eligible, dry_run=False, check_destination=lambda: check(into)[0],
+            on_ledger_change=save, result=result, **run,
+        )
+    finally:
+        # Written ahead during the run, and once more here. If that fails, the ledger goes to
+        # stderr: it is the only record of which items moved and which grants the moves dropped.
+        try:
+            save(result)
+            print(f"\nledger written: {ledger_path} ({len(result.ledger)} item(s))")
+        except Exception as exc:  # noqa: BLE001 - never lose the ledger to a disk error
+            print(f"\nLEDGER NOT WRITTEN ({exc}); here it is:", file=sys.stderr)
+            print(json.dumps(result.ledger, indent=2, ensure_ascii=False), file=sys.stderr)
+
+    # Files moved next to permissions freed: different numbers, and only both together tell a
+    # no-op from a success.
+    print(
+        f"files moved into {into}: {result.moved}; skipped: {result.skipped_filed} filed or in a "
+        f"shared drive, {result.skipped_folders} folder(s)"
+    )
+    if result.moved_not_revoked:
+        print(
+            f"\n{len(result.moved_not_revoked)} item(s) moved (or possibly moved) but NOT "
+            "revoked. Check each, then run revoke --file <ID>:"
+        )
+        for line in result.moved_not_revoked:
+            print(f"  ! {line}")
+    code = _report_change(result, "freed")
+    if result.changed == 0 and result.already == 0:
+        print("\nnothing was freed: the unapproved shares in scope remain")
+        return 1
+    return 1 if result.moved_not_revoked else code
 
 
 def cmd_policy(args) -> int:
@@ -537,6 +663,50 @@ def build_parser() -> argparse.ArgumentParser:
     p_down.add_argument("--apply", action="store_true", help="actually change them")
     common(p_down)
     p_down.set_defaults(fn=cmd_downgrade)
+
+    p_rep = sub.add_parser(
+        "reparent",
+        help="move items into a folder you own to break a grant set on a folder that is gone, then revoke",
+    )
+    selectors(p_rep)
+    p_rep.add_argument(
+        "--into",
+        required=True,
+        help="destination folder id: a My Drive folder this account owns that nobody else can see. "
+        "Checked before anything moves and again during the run, because moved items inherit "
+        "every grant on it",
+    )
+    p_rep.add_argument(
+        "--include-filed",
+        action="store_true",
+        help="also move items that still have a real parent. Off by default: moving a filed item "
+        "reorganises the Drive of its owner rather than fixing a permission",
+    )
+    p_rep.add_argument(
+        "--include-folders",
+        action="store_true",
+        help="also move folders. Off by default: a folder moves with everything inside it",
+    )
+    p_rep.add_argument(
+        "--all",
+        action="store_true",
+        help="required to act with no scope flag",
+    )
+    p_rep.add_argument(
+        "--max-changes",
+        type=int,
+        default=500,
+        dest="max_changes",
+        help="refuse if more than this many permissions on ELIGIBLE items (not filed, not folders) "
+        "would be tried (default 500, 0 disables)",
+    )
+    p_rep.add_argument(
+        "--apply",
+        action="store_true",
+        help="actually move and revoke. Writes a snapshot with the original parents first",
+    )
+    common(p_rep)
+    p_rep.set_defaults(fn=cmd_reparent)
 
     p_policy = sub.add_parser("policy", help="show which policy file is in effect")
     p_policy.add_argument("--policy")

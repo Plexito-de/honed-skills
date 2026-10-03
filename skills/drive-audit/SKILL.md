@@ -5,17 +5,18 @@ description: >-
   removed, reviewed or approved. Fires on "who can see this", "stop sharing", "make it private",
   "anyone with the link", "public", "shared with", "unshare", "revoke access", "sharing audit",
   "Freigabe", "nicht mehr teilen", "nur für mich". Owns the drive-audit CLI (scan, folder, revoke,
-  downgrade, policy), how to read each finding class, what counts as an approved share, and how to
-  keep a policy file so the next run is a diff rather than a re-read.
+  downgrade, reparent, policy), how to read each finding class, what counts as an approved share,
+  and how to keep a policy file so the next run is a diff rather than a re-read.
 license: Apache-2.0
 compatibility: >-
   Requires Python 3.11+ with google-auth and google-api-python-client for anything that talks to
-  Drive. The classifier and its 21-case selftest are standard library only and run with no
-  credentials at all. Credentials come from Application Default Credentials or a service-account
-  key named by an environment variable; no product-specific tooling and no agent-specific paths.
+  Drive. The classifier and its 53-case selftest are standard library only and run with no
+  credentials at all. Credentials come from Application Default Credentials, a service-account
+  key named by an environment variable, or a command that prints one; no product-specific tooling
+  and no agent-specific paths.
 metadata:
-  version: "1.1.1"
-  changeSummary: Frontmatter only. metadata values are strings under the Agent Skills spec, so isBreaking is now "false" rather than a YAML boolean. The skill itself is unchanged.
+  version: "1.2.0"
+  changeSummary: Adds the reparent verb for grants that revoke cannot remove on an orphaned item. It tries a plain delete first and moves an item only when Drive refuses as orphaned, only into a private folder you own, re-checked during the run. A run ledger records every grant an item had before its move, rewritten before every move.
   isBreaking: "false"
 ---
 
@@ -76,6 +77,7 @@ drive-audit revoke --file <ID>             # one named item, EVERY grant on it, 
 drive-audit revoke --principal <EMAIL>     # everything shared with that address
 drive-audit revoke --under <ID> --apply    # snapshot first, then remove
 drive-audit downgrade --principal <EMAIL> --to reader --apply   # keep access, drop write
+drive-audit reparent --principal <EMAIL> --into <ID>   # what revoke cannot remove: move, revoke
 ```
 
 Exit `0` clean, `1` unapproved shares found **or nothing was scanned**. An empty pass is a failure
@@ -249,6 +251,33 @@ returned `403 cannotDeletePermission`. The only fix is to move the items into a 
 controls, which breaks the inheritance chain, and then revoke. **That reorganises somebody's Drive,
 so propose it and let them decide; never do it as part of a cleanup.**
 
+`reparent` does exactly that, and only that, once they have decided. Run it with the same scope
+flags as the `revoke` that was refused; it is a dry run until `--apply`.
+
+- **It tries the plain delete first.** Only a grant Drive refuses with `cannotDeletePermission`
+  moves its item, so an item `revoke` could have cleaned is never reorganised.
+- **The destination must be a private My Drive folder you own, and stay private.** A moved item
+  inherits every grant on its new parent. The tool reads the folder's full permission list and
+  refuses a shared, trashed, shared-drive or foreign folder, before the dry run and again during
+  the run. Sharing that folder later shares everything moved into it, so create one for this.
+- **A move can drop EVERY grant the item inherited, approved ones too.** Tell the owner who else
+  loses access before `--apply`. The run ledger (`*-ledger.json`, next to the snapshot) lists each
+  item's parents and all its grants, with which were inherited, and is rewritten before every move
+  and after each outcome. A move whose outcome is not proven reads `unknown`: check that item by
+  hand. Re-create any grant you still want from it with `permissions.create`.
+- **It moves only orphaned files by default.** An item with a parent is filed on purpose
+  (`--include-filed` overrides, and then removes the item from EVERY folder it is in), an item in
+  a shared drive is never moved, and a folder moves with everything inside it
+  (`--include-folders` overrides).
+- **It moves first, verifies the move, revokes, then reads the permissions back.** Only a grant
+  absent from that read-back counts as freed. An item that moved but kept its grant is listed by
+  id and makes the exit code 1; finish it with `revoke --file <ID>`. An orphan has no parent to
+  return to, so its old access can only come back as a direct grant.
+
+That a refused grant becomes removable once its item has a new parent follows from how Drive
+inherits permissions. It has not been measured here on a live orphan, which is why the read-back
+decides every case rather than the delete's answer.
+
 Google does not document this case. The error string is real and reproducible, but we found no page
 describing an orphaned item whose grant cannot be removed at any reachable level, so read the
 paragraph above as our own measurement rather than as vendor guidance. Related reading, covering
@@ -286,7 +315,7 @@ A revoke that leaves the publisher running is a chore you have scheduled forever
 ## Verify before you believe it
 
 ```bash
-drive-audit --selftest      # 21 cases, no credentials, no network, no Google libraries
+drive-audit --selftest      # 53 cases, no credentials, no network, no Google libraries
 ```
 
 That it runs with no credentials is the point: the classification logic is checkable before this
@@ -299,7 +328,7 @@ Stated here rather than discovered by you, because an audit tool that is quiet a
 is worse than one that has none:
 
 - **A file published to the web is not detected.** That permission is scoped to a separate view, and reading it needs a request parameter this tool does not pass, so a published Doc appears in no class at all. If publish-to-web is a risk you care about, check it by hand.
-- **There is no `restore` command.** The snapshot carries everything needed (`type`, `role`, `allowFileDiscovery`, the address, `expirationTime`, `view`), and restoring a row is one `permissions.create` per row with `sendNotificationEmail=false`, but you write that loop yourself today. Undo is therefore a manual operation, which is a reason to read a dry run rather than to rely on the snapshot.
+- **There is no `restore` command.** The snapshot carries everything needed (`type`, `role`, `allowFileDiscovery`, the address, `expirationTime`, `view`), and restoring a row is one `permissions.create` per row with `sendNotificationEmail=false`, but you write that loop yourself today. Moving items back after a `reparent` is the same: the run ledger names the destination, each item's old parents and every grant it had, and the loop is yours. Undo is therefore a manual operation, which is a reason to read a dry run rather than to rely on the snapshot.
 - **`--under` is one folder's direct children, never a subtree.** There is deliberately no recursive mode.
 - **Shared-drive coverage is newer than the rest**, and costs a request per item that carries its own grant. Treat a first run against a large shared drive as something to check rather than trust.
 - **The inheritance signal is an ordering hint and nothing more.** See the traps section: it cannot prove inheritance, so it never suppresses a row.
@@ -324,7 +353,7 @@ thousands of items. The measurements in this file were taken on real runs rather
 inheritance-id finding, the 404 rate on a resumed sweep, the orphaned-grant dead end, and the share
 of a visibility query that turns out to be other people's files.
 
-What ships here is verifiable without credentials: `scripts/drive-audit --selftest` is 21 offline
+What ships here is verifiable without credentials: `scripts/drive-audit --selftest` is 53 offline
 cases over the classifier, the policy engine and the ordering, and `scripts/example_report.py` prints
 a full report from invented findings. Both the severity split and the policy escalation guard were
 falsified by mutation rather than only confirmed, which is a stronger claim than a passing suite: the
