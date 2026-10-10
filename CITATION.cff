@@ -1,0 +1,15 @@
+cff-version: 1.2.0
+message: If you use these skills in your work, cite them as below.
+title: "honed-skills: Agent Skills honed against real work"
+type: software
+authors:
+  - family-names: Krah
+    given-names: Christopher
+    affiliation: Plexito UG (haftungsbeschränkt)
+repository-code: https://github.com/Plexito-de/honed-skills
+license: Apache-2.0
+date-released: 2026-10-10
+keywords:
+  - agent skills
+  - ai agents
+  - claude code

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or idea
+    url: https://github.com/Plexito-de/honed-skills/discussions
+    about: Ask a question or float an idea in Discussions.
+  - name: Security problem
+    url: https://github.com/Plexito-de/honed-skills/security/advisories/new
+    about: Report a vulnerability privately, for example an instruction in a skill that an agent could be tricked into running.

@@ -1,0 +1,24 @@
+name: A skill misbehaves
+description: A skill loads when it should not, does not load when it should, or fails on your machine.
+labels: ["bug"]
+body:
+  - type: dropdown
+    id: skill
+    attributes:
+      label: Skill
+      options: [comb-pdf-form-filling, din5008-letter, drive-audit, excalidraw, human-review, qr-code, video-to-readings]
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you asked the agent, what it did, and what you expected. Paste command output where there is one.
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: Agent, operating system, and versions of the skill's dependencies
+    validations:
+      required: true

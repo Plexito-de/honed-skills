@@ -1,0 +1,24 @@
+name: CLA
+
+# pull_request_target is required so the check can comment on pull requests from forks.
+# The reusable workflow never checks out or runs code from the pull request.
+on:
+  pull_request_target: # zizmor: ignore[dangerous-triggers]
+    types: [opened, synchronize, reopened]
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  cla:
+    if: >-
+      github.event_name == 'pull_request_target' ||
+      (github.event.issue.pull_request && github.event.comment.user.type != 'Bot')
+    permissions:
+      contents: write
+      pull-requests: write
+      statuses: write
+    uses: Plexito-de/.github/.github/workflows/cla.yml@main # zizmor: ignore[unpinned-uses] our own org's workflow
+    with:
+      allowlist: "chrikrah,*[bot]"

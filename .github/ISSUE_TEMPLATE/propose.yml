@@ -1,0 +1,24 @@
+name: Propose a skill
+description: A task an agent gets wrong in a way a skill could fix.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: task
+    attributes:
+      label: The task
+      description: What the agent is asked to do, in the words a user would use.
+    validations:
+      required: true
+  - type: textarea
+    id: failure
+    attributes:
+      label: What went wrong the first time
+      description: The failure that looked like success, the flag that lied, the check that was missing. This is what a skill here is built from.
+    validations:
+      required: true
+  - type: checkboxes
+    id: help
+    attributes:
+      label: Contribution
+      options:
+        - label: I would like to write the skill myself.
