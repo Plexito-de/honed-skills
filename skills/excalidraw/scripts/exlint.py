@@ -25,11 +25,15 @@ warnings to errors.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
+import hashlib
+import io
 import json
 import math
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 ASSETS = Path(__file__).resolve().parent.parent / "assets"
 EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
@@ -1040,6 +1044,136 @@ def built_cases(case, rules, failures: list[str], checked: list[int], metrics) -
          edit(lambda els: custom(next(e for e in els if custom(e).get("role") == "title"))
               .pop("provenance")), "provenance-missing", want=False)
 
+    # Determinism: pin BLAKE2b digests of exdraw.build() for each shipped spec
+    example_digests = {
+        "request-path": "dea3cfa59050b01ce221db053c4da5cb851cf95dabfaa7311aaf2de473a31634a6ec6c7f9782746efe3df50ff3880b52e78ecc15a61c9ae621e3cb6f9cfb4392",
+        "c4": "7a43a4bd210af2f22fb9df7b4d7525945455f094f5a5dd14d4b35d0a15046b58e596e011eda62e321f75f7e08972c71486e0a6e80f879021764989dada71532f",
+    }
+    for name, expected_hash in example_digests.items():
+        checked[0] += 1
+        scene1 = built(EXAMPLE_SPECS[name])
+        scene2 = built(EXAMPLE_SPECS[name])
+        b1 = json.dumps(scene1, indent=2).encode("utf-8")
+        b2 = json.dumps(scene2, indent=2).encode("utf-8")
+        if b1 != b2:
+            failures.append(f"determinism: {name} build is not byte-identical across runs")
+        actual_hash = hashlib.blake2b(b1).hexdigest()
+        if actual_hash != expected_hash:
+            failures.append(f"determinism: {name} digest mismatch: {actual_hash}")
+
+    # Exact bytes of CLI default output path (mocking file write and clock)
+    checked[0] += 1
+    dummy_spec_path = Path("test_spec.json")
+    spec_json = json.dumps(EXAMPLE_SPECS["request-path"])
+    with patch("sys.argv", ["exdraw.py", str(dummy_spec_path)]), \
+         patch.object(Path, "read_bytes", return_value=spec_json.encode("utf-8")), \
+         patch.object(Path, "write_text") as mock_write, \
+         contextlib.redirect_stdout(io.StringIO()):
+        ret = exdraw.main()
+        if ret != 0:
+            failures.append(f"CLI main() exited with {ret}")
+        else:
+            args, _ = mock_write.call_args
+            written_bytes = args[0].encode("utf-8")
+            written_digest = hashlib.blake2b(written_bytes).hexdigest()
+            expected_cli_digest = "c5b879a514c03b0bb3139434ecd6afd6dc3b00de253c3be3848d6bc60595f8c1a3ec8f6e6409685b6e5303e351239d7e8de2968289ff20cfaac8a26ec79425ec"
+            if written_digest != expected_cli_digest:
+                failures.append(f"CLI default output digest mismatch: {written_digest}")
+
+    # Provenance edits: changing source or node anchor preserves IDs; changing label re-rolls
+    checked[0] += 1
+    base_ids = [(e["id"], e.get("seed"), e.get("versionNonce")) for e in c4["elements"]]
+    spec_src = copy.deepcopy(EXAMPLE_SPECS["c4"])
+    spec_src["source"]["commit"] = "0000000000000000000000000000000000000000"
+    res_src = built(spec_src)
+    src_ids = [(e["id"], e.get("seed"), e.get("versionNonce")) for e in res_src["elements"]]
+    if src_ids != base_ids:
+        failures.append("provenance: changing source commit did not preserve element IDs/seeds")
+
+    checked[0] += 1
+    spec_anchor = copy.deepcopy(EXAMPLE_SPECS["c4"])
+    spec_anchor["nodes"][1]["at"] = "web/src/Other.tsx:1-50"
+    res_anchor = built(spec_anchor)
+    anchor_ids = [(e["id"], e.get("seed"), e.get("versionNonce")) for e in res_anchor["elements"]]
+    if anchor_ids != base_ids:
+        failures.append("provenance: changing node anchor did not preserve element IDs/seeds")
+
+    checked[0] += 1
+    spec_label = copy.deepcopy(EXAMPLE_SPECS["c4"])
+    spec_label["nodes"][0]["label"] = "End User"
+    res_label = built(spec_label)
+    base_eids = {e["id"] for e in c4["elements"]}
+    label_eids = {e["id"] for e in res_label["elements"]}
+    if base_eids & label_eids:
+        failures.append("provenance: changing node label did not re-roll all element IDs")
+
+    # Bindings: every arrow in EXAMPLE_SPECS has bidirectional bindings with fixedPoint != 0.5
+    for name in EXAMPLE_SPECS:
+        checked[0] += 1
+        scene = built(EXAMPLE_SPECS[name])
+        by_id = {e["id"]: e for e in scene["elements"]}
+        arrows = [e for e in scene["elements"] if e.get("type") == "arrow"]
+        for a in arrows:
+            aid = a["id"]
+            sb = a.get("startBinding")
+            eb = a.get("endBinding")
+            if not sb or not eb:
+                failures.append(f"bindings: arrow {aid} in {name} is missing endpoint bindings")
+                continue
+            for b in (sb, eb):
+                fp = b.get("fixedPoint")
+                if fp == [0.5, 0.5]:
+                    failures.append(f"bindings: arrow {aid} in {name} has un-normalized fixedPoint 0.5")
+                tid = b.get("elementId")
+                target = by_id.get(tid)
+                if not target:
+                    failures.append(f"bindings: arrow {aid} target {tid} not found")
+                    continue
+                bound_ids = [be["id"] for be in (target.get("boundElements") or [])]
+                if aid not in bound_ids:
+                    failures.append(f"bindings: target {tid} does not list arrow {aid} in boundElements")
+
+    # Assert removing reciprocal arrow binding fails exlint.lint() with binding-one-sided
+    checked[0] += 1
+    broken_scene = built(EXAMPLE_SPECS["request-path"])
+    first_shape = next(e for e in broken_scene["elements"] if e.get("type") == "rectangle")
+    first_shape["boundElements"] = []
+    broken_rules = {f.rule for f in lint(broken_scene, metrics)}
+    if "binding-one-sided" not in broken_rules:
+        failures.append("bindings: removing reciprocal arrow binding did not fire binding-one-sided")
+
+    # Literal text metrics against expected widths and unknown fallback glyphs
+    checked[0] += 1
+    w_ellipse = exdraw.max_text_width("ellipse", 200, 16)
+    if w_ellipse != 131:
+        failures.append(f"metrics: ellipse text width for w=200 is {w_ellipse}, expected 131")
+
+    checked[0] += 1
+    w_diamond = exdraw.max_text_width("diamond", 200, 16)
+    if w_diamond != 90:
+        failures.append(f"metrics: diamond text width for w=200 is {w_diamond}, expected 90")
+
+    checked[0] += 1
+    m_calc = exdraw.Metrics()
+    w_font5 = round(m_calc.line_width("Hello world", 5, 20), 2)
+    if w_font5 != 101.90:
+        failures.append(f"metrics: font 5 width = {w_font5}, expected 101.90")
+
+    checked[0] += 1
+    w_font6 = round(m_calc.line_width("Hello world", 6, 20), 2)
+    if w_font6 != 107.40:
+        failures.append(f"metrics: font 6 width = {w_font6}, expected 107.40")
+
+    checked[0] += 1
+    w_unk5 = round(m_calc.family(5)["fallbackWidth"] * 20, 2)
+    if w_unk5 != 10.43:
+        failures.append(f"metrics: font 5 unknown char width = {w_unk5}, expected 10.43")
+
+    checked[0] += 1
+    w_unk6 = round(m_calc.family(6)["fallbackWidth"] * 20, 2)
+    if w_unk6 != 10.24:
+        failures.append(f"metrics: font 6 unknown char width = {w_unk6}, expected 10.24")
+
 
 def self_test() -> int:
     """Falsification: seed each defect, assert the rule fires, remove it, assert it stops."""
@@ -1061,11 +1195,13 @@ def self_test() -> int:
     def rules(scene) -> set[str]:
         return {f.rule for f in lint(scene, metrics)}
 
-    def case(name: str, mutate, rule: str, want: bool = True) -> None:
+    def case(name: str, mutate, rule: str, want: bool = True, severity: str | None = None) -> None:
         checked[0] += 1
         scene = base_scene()
         mutate(scene)
-        fired = rule in rules(scene)
+        findings = lint(scene, metrics)
+        matched = [f for f in findings if f.rule == rule]
+        fired = len(matched) > 0
         if fired != want:
             # The verdict is hoisted out of the f-string on purpose. A nested quote inside an
             # f-string opens a span that a bounded static parser cannot close, which marks this
@@ -1073,6 +1209,10 @@ def self_test() -> int:
             # AE1 finding at HIGH severity. Found by bisecting this file, 2026-09-09.
             verdict = "did not fire" if want else "fired"
             failures.append(f"{name}: rule {rule} {verdict}")
+        elif want and severity is not None:
+            actual = matched[0].severity
+            if actual != severity:
+                failures.append(f"{name}: rule {rule} severity is {actual}, expected {severity}")
 
     clean = rules(base_scene())
     for rule in ("node-overlap", "binding-one-sided", "points-origin", "roundness-class",
@@ -1082,26 +1222,37 @@ def self_test() -> int:
             failures.append(f"baseline: {rule} fires on a clean scene (false positive)")
 
     case("unknown type", lambda s: s["elements"][0].__setitem__("type", "rectangel"),
-         "type-unknown")
-    case("duplicate id", lambda s: s["elements"][1].__setitem__("id", "box1"), "id-duplicate")
-    case("zero coordinate", lambda s: s["elements"][0].__setitem__("x", 0), "zero-coordinate")
-    case("zero size", lambda s: s["elements"][0].update(width=0, height=0), "zero-size")
-    case("opacity scale", lambda s: s["elements"][0].__setitem__("opacity", 0.5), "opacity-range")
-    case("rotated", lambda s: s["elements"][0].__setitem__("angle", 0.4), "rotated")
+         "type-unknown", severity="error")
+    case("duplicate id", lambda s: s["elements"][1].__setitem__("id", "box1"),
+         "id-duplicate", severity="error")
+    case("zero coordinate", lambda s: s["elements"][0].__setitem__("x", 0),
+         "zero-coordinate", severity="warn")
+    case("zero size", lambda s: s["elements"][0].update(width=0, height=0),
+         "zero-size", severity="error")
+    case("opacity scale", lambda s: s["elements"][0].__setitem__("opacity", 0.5),
+         "opacity-range", severity="error")
+    case("rotated", lambda s: s["elements"][0].__setitem__("angle", 0.4),
+         "rotated", severity="warn")
     case("roundness class", lambda s: s["elements"][0].__setitem__("roundness", {"type": 2}),
-         "roundness-class")
-    case("seed default", lambda s: s["elements"][0].__setitem__("seed", 1), "seed-default")
-    case("legacy key", lambda s: s["elements"][0].__setitem__("gap", 4), "legacy-key")
-    case("index written", lambda s: s["elements"][0].__setitem__("index", "a0"), "index-written")
-    case("overlap", lambda s: s["elements"][1].update(x=120, y=110), "node-overlap")
-    case("all stacked", lambda s: s["elements"][1].update(x=100, y=100), "all-stacked")
-    case("tiny node", lambda s: s["elements"][0].update(width=20, height=10), "node-too-small")
+         "roundness-class", severity="error")
+    case("seed default", lambda s: s["elements"][0].__setitem__("seed", 1),
+         "seed-default", severity="warn")
+    case("legacy key", lambda s: s["elements"][0].__setitem__("gap", 4),
+         "legacy-key", severity="error")
+    case("index written", lambda s: s["elements"][0].__setitem__("index", "a0"),
+         "index-written", severity="warn")
+    case("overlap", lambda s: s["elements"][1].update(x=120, y=110),
+         "node-overlap", severity="error")
+    case("all stacked", lambda s: s["elements"][1].update(x=100, y=100),
+         "all-stacked", severity="error")
+    case("tiny node", lambda s: s["elements"][0].update(width=20, height=10),
+         "node-too-small", severity="warn")
     case("many roughness", lambda s: s["elements"][1].__setitem__("roughness", 2),
-         "many-roughness")
+         "many-roughness", severity="warn")
     case("many fills", lambda s: [s["elements"].append(
         dict(s["elements"][0], id=f"f{i}", x=1000 + i * 200, backgroundColor=c, seed=i + 50))
         for i, c in enumerate(["#ffc9c9", "#b2f2bb", "#a5d8ff", "#ffec99", "#d0bfff", "#e9ecef"])],
-        "many-fills")
+        "many-fills", severity="warn")
 
     def text_el(**over) -> dict:
         text = {"id": "t1", "type": "text", "x": 105, "y": 117, "width": 40, "height": 25,
@@ -1131,13 +1282,13 @@ def self_test() -> int:
         return inner
 
     case("text ok", with_text(), "binding-one-sided", want=False)
-    case("one-sided text", with_text(break_reciprocal=True), "binding-one-sided")
-    case("no lineHeight", with_text({"lineHeight": None}), "lineheight-missing")
+    case("one-sided text", with_text(break_reciprocal=True), "binding-one-sided", severity="error")
+    case("no lineHeight", with_text({"lineHeight": None}), "lineheight-missing", severity="error")
     case("narrow text", with_text({"text": "Authentication Service", "width": 40}),
-         "text-too-narrow")
+         "text-too-narrow", severity="error")
     case("fractional size", with_text({"fontSize": 22.87, "width": 45.7, "height": 28.5875}),
-         "fontsize-fractional")
-    case("text height wrong", with_text({"height": 40}), "text-height")
+         "fontsize-fractional", severity="warn")
+    case("text height wrong", with_text({"height": 40}), "text-height", severity="error")
 
     def add_arrow(scene, **over):
         arrow = {"id": "a1", "type": "arrow", "x": 256, "y": 130, "width": 138, "height": 0,
@@ -1167,18 +1318,19 @@ def self_test() -> int:
         return inner
 
     case("arrow ok", with_arrow(), "binding-one-sided", want=False)
-    case("arrow one-sided", with_arrow(drop_reciprocal=True), "binding-one-sided")
-    case("points origin", with_arrow({"points": [[5, 5], [138, 0]]}), "points-origin")
+    case("arrow one-sided", with_arrow(drop_reciprocal=True), "binding-one-sided", severity="error")
+    case("points origin", with_arrow({"points": [[5, 5], [138, 0]]}), "points-origin", severity="error")
     case("fixedPoint half", with_arrow(
         {"startBinding": {"elementId": "box1", "fixedPoint": [0.5, 0.5], "mode": "orbit"}}),
-        "fixedpoint-half")
+        "fixedpoint-half", severity="error")
     case("dangling binding", with_arrow(
         {"endBinding": {"elementId": "nope", "fixedPoint": [0, 0.5001], "mode": "orbit"}}),
-        "binding-dangling")
+        "binding-dangling", severity="error")
     case("implicit arrowhead", lambda s: s["elements"].append(
-        {k: v for k, v in add_arrow(s).items() if k != "endArrowhead"}), "arrowhead-implicit")
+        {k: v for k, v in add_arrow(s).items() if k != "endArrowhead"}),
+        "arrowhead-implicit", severity="error")
     case("huge arrow", with_arrow({"width": 90000, "points": [[0, 0], [90000, 0]]}),
-         "linear-too-large")
+         "linear-too-large", severity="error")
 
     stroke_cases(case, base_scene, text_el, failures, checked)
     built_cases(case, rules, failures, checked, metrics)
