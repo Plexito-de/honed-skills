@@ -26,6 +26,7 @@ DESIGN
 USAGE
   review open draft.md card.png form.pdf     stage anything, open the page, return at once
   review open deck.pptx                      one page per slide, plus the speaker notes as text
+  review open document.docx                  one page per page, rendered via LibreOffice
   review poll [--session ID] [--ack]         block until Send, print the batch as JSON
   review status [--session ID]               is a batch waiting
   review close [--session ID]                stop the server
@@ -38,6 +39,7 @@ import contextlib
 import hashlib
 import html as html_mod
 import http.server
+import io
 import json
 import os
 import posixpath
@@ -258,14 +260,44 @@ def pptx_notes(pptx: Path) -> list[str]:
         return notes
 
 
-def pptx_to_pdf(pptx: Path, out_dir: Path) -> Path | None:
+def office_to_pdf(src: Path, dest: Path, timeout: float = 30) -> Path | None:
     soffice = shutil.which("soffice") or shutil.which("libreoffice")
     if not soffice:
-        print(f"skipping {pptx.name}: needs LibreOffice (soffice) to render slides", file=sys.stderr)
+        what = "slides" if src.suffix.lower() == ".pptx" else "pages"
+        print(f"skipping {src.name}: needs LibreOffice (soffice) to render {what}", file=sys.stderr)
         return None
-    subprocess.run([soffice, "--headless", "--convert-to", "pdf", "--outdir", str(out_dir),
-                    str(pptx)], check=True, capture_output=True)
-    return out_dir / f"{pptx.stem}.pdf"
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        profile_dir = tmp_path / "profile"
+        conv_dir = tmp_path / "out"
+        conv_dir.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            soffice,
+            f"-env:UserInstallation=file://{profile_dir.resolve()}",
+            "--headless",
+            "--convert-to", "pdf",
+            "--outdir", str(conv_dir),
+            str(src.resolve()),
+        ]
+        try:
+            res = subprocess.run(cmd, capture_output=True, timeout=timeout)
+            if res.returncode != 0:
+                print(f"skipping {src.name}: LibreOffice conversion failed (exit {res.returncode})", file=sys.stderr)
+                return None
+        except subprocess.TimeoutExpired:
+            print(f"skipping {src.name}: LibreOffice conversion timed out after {timeout}s", file=sys.stderr)
+            return None
+        except OSError as exc:
+            print(f"skipping {src.name}: failed to run LibreOffice: {exc}", file=sys.stderr)
+            return None
+
+        converted = conv_dir / f"{src.stem}.pdf"
+        if not converted.is_file() or converted.stat().st_size == 0:
+            print(f"skipping {src.name}: LibreOffice wrote no PDF for it", file=sys.stderr)
+            return None
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(converted, dest)
+        return dest
 
 
 def notes_html(notes: list[str]) -> str:
@@ -297,26 +329,31 @@ def stage_inputs(paths: list[Path], sess: Path) -> list[dict]:
         if not src.exists():
             sys.exit(f"no such file: {src}")
         suffix = src.suffix.lower()
-        if suffix == ".pptx":
-            pdf = pptx_to_pdf(src, adir)
-            if pdf is None:
-                continue
-            if not pdf.exists():
-                # LibreOffice exits 0 and writes nothing often enough to matter: a locked profile,
-                # a deck it refuses. A missing file here must read as a skipped deck, not as a
-                # traceback in a forked server nobody is watching.
-                print(f"skipping {src.name}: LibreOffice wrote no PDF for it", file=sys.stderr)
+        if suffix in (".pptx", ".docx"):
+            if suffix == ".docx" and not zipfile.is_zipfile(src):
+                print(f"skipping {src.name}: password-protected Word document is not a zip", file=sys.stderr)
                 continue
             ident, asset = base(src.stem)
-            dest = pdf.rename(adir / f"{asset}.pdf")
-            items.append({"kind": "media", "format": "pdf", "id": ident, "asset": asset,
-                          "name": src.name, "url": f"/asset/{dest.name}",
-                          "source": str(src.resolve()), "page_label": "slide", "deck": True})
-            ident, asset = base(f"{src.stem}_notes")
-            items.append({"kind": "text", "id": ident, "asset": asset,
-                          "name": f"{src.stem} speaker notes", "format": "html",
-                          "html": notes_html(pptx_notes(src)), "source": str(src.resolve()),
-                          "notes_of": str(src.resolve())})
+            dest = adir / f"{asset}.pdf"
+            pdf = office_to_pdf(src, dest)
+            if pdf is None:
+                continue
+            source_hash = hashlib.sha256(src.read_bytes()).hexdigest()
+            if suffix == ".pptx":
+                items.append({"kind": "media", "format": "pdf", "id": ident, "asset": asset,
+                              "name": src.name, "url": f"/asset/{dest.name}",
+                              "source": str(src.resolve()), "page_label": "slide", "deck": True,
+                              "source_sha256": source_hash})
+                ident, asset = base(f"{src.stem}_notes")
+                items.append({"kind": "text", "id": ident, "asset": asset,
+                              "name": f"{src.stem} speaker notes", "format": "html",
+                              "html": notes_html(pptx_notes(src)), "source": str(src.resolve()),
+                              "notes_of": str(src.resolve())})
+            else:
+                items.append({"kind": "media", "format": "pdf", "id": ident, "asset": asset,
+                              "name": src.name, "url": f"/asset/{dest.name}",
+                              "source": str(src.resolve()), "page_label": "page",
+                              "source_sha256": source_hash})
             continue
         if suffix == ".pdf":
             ident, asset = base(src.stem)
@@ -351,7 +388,7 @@ def stage_inputs(paths: list[Path], sess: Path) -> list[dict]:
                           "name": src.name, "format": fmt, "html": body,
                           "source": str(src.resolve())})
             continue
-        print(f"skipping {src.name}: reviewable types are images, PDF, PowerPoint, Markdown, HTML, txt",
+        print(f"skipping {src.name}: reviewable types are images, PDF, PowerPoint, Word, Markdown, HTML, txt",
               file=sys.stderr)
     if not items:
         sys.exit("nothing to review among the given files")
@@ -467,7 +504,21 @@ def write_outputs(sess: Path, payload: dict) -> dict:
     # Receipt: a fact other gates can read, instead of a claim that he looked.
     files = sorted({p["source"] for p in pages_out if p.get("source")})
     # The hash pins WHICH bytes were reviewed: a rebuilt deck at the same path is a new review.
-    hashes = {f: hashlib.sha256(Path(f).read_bytes()).hexdigest() for f in files if Path(f).is_file()}
+    staged_by_src = {it.get("source"): it for it in staged.values() if it.get("source")}
+    hashes = {}
+    for f in files:
+        pf = Path(f)
+        if not pf.is_file():
+            continue
+        curr = hashlib.sha256(pf.read_bytes()).hexdigest()
+        staged_item = staged_by_src.get(f)
+        staged_hash = staged_item.get("source_sha256") if staged_item else None
+        if staged_hash:
+            if curr != staged_hash:
+                print(f"warning: {pf.name} changed on disk since review opened", file=sys.stderr)
+            hashes[f] = staged_hash
+        else:
+            hashes[f] = curr
     (sess / "receipt.json").write_text(json.dumps(
         {"reviewed_at": batch["received_at"],
          "files": files,
@@ -901,6 +952,24 @@ def _write_tiny_pptx(path: Path) -> None:
                    "</p:spTree></p:cSld></p:notes>")
 
 
+def _write_tiny_docx(path: Path) -> None:
+    """A minimal valid docx with one paragraph, readable by zipfile and Office."""
+    content_types = ('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                     '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+                     '<Default Extension="xml" ContentType="application/xml"/>'
+                     '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+                     '</Types>')
+    rels = ('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'
+            '</Relationships>')
+    doc = ('<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+           '<w:body><w:p><w:r><w:t>Fixture document</w:t></w:r></w:p></w:body></w:document>')
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("[Content_Types].xml", content_types)
+        z.writestr("_rels/.rels", rels)
+        z.writestr("word/document.xml", doc)
+
+
 FIXTURE_PAGES = [
     [(72, 760, 20, "Fixture statement"),
      (72, 700, 12, "Interest 1.234,56 EUR for the period"),
@@ -989,6 +1058,133 @@ def cmd_selftest(args) -> int:
         check("pptx speaker notes", pptx_notes(deck), ["Say the why.\nThen the ask.", ""])
         check("a slide without notes says so",
               "<h3>Slide 2</h3><p><em>no speaker notes</em></p>" in notes_html(pptx_notes(deck)))
+
+    # ---- soffice conversions and stub modes (.pptx and .docx) --------------------------
+    with tempfile.TemporaryDirectory() as tmp_soffice:
+        tmp_s = Path(tmp_soffice)
+        sess = tmp_s / "sess"
+        sess.mkdir()
+        deck = tmp_s / "test_deck.pptx"
+        _write_tiny_pptx(deck)
+        doc = tmp_s / "test_doc.docx"
+        _write_tiny_docx(doc)
+        encrypted_doc = tmp_s / "encrypted.docx"
+        encrypted_doc.write_bytes(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"EncryptedPackage")
+        dummy_card = tmp_s / "fallback.png"
+        dummy_card.write_bytes(base64.b64decode(PNG_1PX))
+
+        # Encrypted docx is skipped before soffice runs
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            enc_items = stage_inputs([encrypted_doc, dummy_card], sess)
+        check("encrypted docx is skipped before soffice runs",
+              [i["name"] for i in enc_items], ["fallback.png"])
+        check("encrypted docx emits skipping warning",
+              "password-protected Word document is not a zip" in err.getvalue())
+
+        # Setup stub soffice script
+        mode_file = tmp_s / "soffice_mode"
+        stub_soffice = tmp_s / "stub_soffice"
+        stub_soffice.write_text(f"""#!/usr/bin/env python3
+import sys
+from pathlib import Path
+
+mode = Path({repr(str(mode_file))}).read_text().strip()
+if mode == "write":
+    out = Path(sys.argv[sys.argv.index("--outdir") + 1])
+    src = Path(sys.argv[-1])
+    (out / f"{{src.stem}}.pdf").write_bytes(b"%PDF-1.4 minimal")
+    sys.exit(0)
+elif mode == "no_pdf":
+    sys.exit(0)
+elif mode == "fail":
+    sys.exit(1)
+""")
+        stub_soffice.chmod(0o755)
+
+        orig_which = shutil.which
+
+        # Mode 1: missing
+        mode_file.write_text("missing")
+        shutil.which = lambda cmd: None if cmd in ("soffice", "libreoffice") else orig_which(cmd)
+        try:
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                missing_items = stage_inputs([deck, doc, dummy_card], sess)
+            check("soffice missing skips pptx and docx",
+                  [i["name"] for i in missing_items], ["fallback.png"])
+            check("soffice missing emits skipping warning",
+                  "needs LibreOffice (soffice) to render" in err.getvalue())
+        finally:
+            shutil.which = orig_which
+
+        # Mode 3: exits 0 without a PDF
+        mode_file.write_text("no_pdf")
+        shutil.which = lambda cmd: str(stub_soffice) if cmd in ("soffice", "libreoffice") else orig_which(cmd)
+        try:
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                no_pdf_items = stage_inputs([deck, doc, dummy_card], sess)
+            check("soffice exits 0 without a PDF skips items",
+                  [i["name"] for i in no_pdf_items], ["fallback.png"])
+            check("soffice exits 0 without PDF emits skipping warning",
+                  "LibreOffice wrote no PDF for it" in err.getvalue())
+        finally:
+            shutil.which = orig_which
+
+        # Mode 4: exits non-zero
+        mode_file.write_text("fail")
+        shutil.which = lambda cmd: str(stub_soffice) if cmd in ("soffice", "libreoffice") else orig_which(cmd)
+        try:
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                fail_items = stage_inputs([deck, doc, dummy_card], sess)
+            check("soffice exits non-zero skips items",
+                  [i["name"] for i in fail_items], ["fallback.png"])
+            check("soffice exits non-zero emits skipping warning",
+                  "LibreOffice conversion failed" in err.getvalue())
+        finally:
+            shutil.which = orig_which
+
+        # Mode 2: writes the PDF (and assert item shapes for both .pptx and .docx)
+        mode_file.write_text("write")
+        shutil.which = lambda cmd: str(stub_soffice) if cmd in ("soffice", "libreoffice") else orig_which(cmd)
+        try:
+            pptx_staged = stage_inputs([deck], sess)
+            check("pptx item count is two (deck + notes)", len(pptx_staged), 2)
+            check("pptx deck item shape",
+                  (pptx_staged[0]["kind"], pptx_staged[0]["format"], pptx_staged[0]["page_label"], pptx_staged[0].get("deck")),
+                  ("media", "pdf", "slide", True))
+            check("pptx notes item shape",
+                  (pptx_staged[1]["kind"], pptx_staged[1]["format"], pptx_staged[1].get("notes_of")),
+                  ("text", "html", str(deck.resolve())))
+
+            docx_staged = stage_inputs([doc], sess)
+            check("docx item count is one (pages, no notes)", len(docx_staged), 1)
+            check("docx item shape",
+                  (docx_staged[0]["kind"], docx_staged[0]["format"], docx_staged[0]["page_label"], docx_staged[0].get("deck")),
+                  ("media", "pdf", "page", None))
+
+            # Source snapshot: hash at staging and warn on Send if changed since
+            h_staged = docx_staged[0].get("source_sha256")
+            check("docx source_sha256 recorded at staging", bool(h_staged), True)
+
+            # Modify docx on disk
+            doc.write_bytes(b"modified docx content")
+            stderr_buf = io.StringIO()
+            with contextlib.redirect_stderr(stderr_buf):
+                batch_res = write_outputs(sess, {"pages": [
+                    {"kind": "media", "item": docx_staged[0]["id"], "page": 1, "pages": 1,
+                     "name": "test_doc.docx, page 1", "overview_png": "data:image/png;base64," + PNG_1PX,
+                     "crops": [], "comments": []}
+                ]})
+            receipt_data = json.loads((sess / "receipt.json").read_text())
+            check("source snapshot warns on Send when file changed",
+                  "warning: test_doc.docx changed on disk since review opened" in stderr_buf.getvalue(), True)
+            check("receipt certifies staged hash, not modified bytes",
+                  receipt_data["sha256"].get(str(doc.resolve())), h_staged)
+        finally:
+            shutil.which = orig_which
 
     # ---- the vendored parser -------------------------------------------------------------
     check("vendored pdf.js matches its checksums", vendor_mismatches(), [])

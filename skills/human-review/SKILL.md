@@ -10,20 +10,15 @@ compatibility: >-
   Requires Python 3.9+ and nothing from pip, npm or Node. PDF pages are drawn in the browser by a
   pinned, checksummed copy of PDF.js (Apache-2.0) that ships in assets/vendor/pdfjs and is served
   from 127.0.0.1, so no renderer has to be installed and nothing is fetched at run time. A
-  PowerPoint deck still needs LibreOffice (`soffice`) to become a PDF first. Works offline.
-  Agent-agnostic.
+  PowerPoint deck or Word document (.docx) needs LibreOffice (`soffice`) to become a PDF first.
+  Works offline. Agent-agnostic.
 metadata:
-  version: "1.3.0"
+  version: "1.4.0"
   changeSummary: >-
-    A draft can now be reviewed like a picture and like a document at once. A selection may run
-    over several paragraphs: blocks become editable only once the caret is in one, so the browser
-    no longer clamps a selection to a single paragraph, and Shift+Arrow and Ctrl+Alt+M give the
-    keyboard the same reach. Circle, box, freehand and arrow now work on a draft; each shape is
-    read by its own outline, its words are taken when it is drawn, and it stays pinned to its
-    paragraph through edits above it. The Select tool is shown as Text whenever a draft or a PDF is
-    in the session. The batch gains fields and loses none: a multi-paragraph comment adds
-    `blocks` and `parts`, and a shape on a draft adds `tool` and `box` and carries an empty
-    `anchor`.
+    Word documents (.docx) can now be reviewed alongside PowerPoint decks (.pptx), images, and
+    PDFs. Converted via LibreOffice in a hardened per-file sandbox with throwaway user profile and
+    timeout. Password-protected files are skipped cleanly. Source files are snapshot-hashed at
+    staging to warn if changed before Send and keep the receipt authoritative.
   isBreaking: "false"
 ---
 
@@ -264,7 +259,8 @@ the most expensive input in the loop. Do not spend it on a defect a tool can fin
   `default-src 'none'` with a fresh nonce for its two scripts, so a reviewed HTML draft can no longer
   run an `onclick=` handler or a `javascript:` link, and `img-src 'self'` means a **remote image
   inside a reviewed draft does not load**. Inline it, or review a screenshot, if you need to see it.
-- A PowerPoint deck still needs LibreOffice (`soffice`) to become a PDF first.
+- A PowerPoint deck (.pptx) or Word document (.docx) needs LibreOffice (`soffice`) to become a PDF first.
+- Word (.docx) review limits: Word comments are not rendered, tracked changes show as the document last displayed them, and a Word file is reviewed by marking and commenting, not retyping.
 - The Markdown renderer is a deliberate **subset**: headings, lists, quotes, code, tables, links,
   emphasis. Anything else stays a paragraph, and nothing disappears. Full CommonMark needs a
   dependency, and a draft review does not need it.
