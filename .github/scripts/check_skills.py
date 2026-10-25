@@ -4,7 +4,8 @@ Usage:   python3 .github/scripts/check_skills.py [repo root]   (exits 1 and list
 Checked: a SKILL.md with `name` and `description` frontmatter, `name` equal to the folder name, a
 `description` of at most 1,024 characters (the Agent Skills specification's limit; claude.ai refuses a
 longer one on upload), a LICENSE in the folder, no `allowed-tools` key, no `!`command`` injection
-anywhere in SKILL.md, and no binary asset inside the skill folder.
+anywhere in SKILL.md, no binary asset inside the skill folder, and
+.github/ISSUE_TEMPLATE/misbehaves.yml options matching skills/.
 
 Warned, not failed: a SKILL.md over 500 lines, the specification's recommendation for the main file.
 """
@@ -43,9 +44,33 @@ def frontmatter(text: str) -> dict[str, str] | None:
     return keys
 
 
+def template_options(text: str) -> list[str]:
+    """Extract options from the skill dropdown in an issue template."""
+    m_block = re.search(r"id:\s*skill\b(.*?)(?:\n\s*-\s+type:|\Z)", text, re.DOTALL)
+    section = m_block.group(1) if m_block else text
+    match = re.search(r"options:\s*\[(.*?)\]", section, re.DOTALL)
+    if match:
+        return [item.strip().strip("'\"") for item in match.group(1).split(",") if item.strip()]
+    items: list[str] = []
+    in_options = False
+    for line in section.splitlines():
+        if re.match(r"^\s*options:\s*$", line):
+            in_options = True
+            continue
+        if in_options:
+            if not line.strip():
+                continue
+            m = re.match(r"^\s*-\s+(.*)$", line)
+            if m:
+                items.append(m.group(1).strip().strip("'\""))
+            else:
+                break
+    return items
+
+
 def check(root: Path) -> list[str]:
     problems: list[str] = []
-    skills = sorted(p for p in (root / "skills").iterdir() if p.is_dir())
+    skills = sorted(p for p in (root / "skills").iterdir() if p.is_dir() and not p.name.startswith("."))
     if not skills:
         return ["no skill folders found under skills/"]
     for skill in skills:
@@ -77,6 +102,25 @@ def check(root: Path) -> list[str]:
         for f in skill.rglob("*"):
             if f.suffix.lower() in BINARY:
                 problems.append(f"{skill.name}: binary asset {f.relative_to(skill)}; use docs/assets/")
+    template = root / ".github" / "ISSUE_TEMPLATE" / "misbehaves.yml"
+    if not template.is_file():
+        problems.append(".github/ISSUE_TEMPLATE/misbehaves.yml: no misbehaves.yml template")
+    else:
+        actual_options = template_options(template.read_text(encoding="utf-8"))
+        expected_skills = [p.name for p in skills]
+        if actual_options != expected_skills:
+            missing = sorted(set(expected_skills) - set(actual_options))
+            extra = sorted(set(actual_options) - set(expected_skills))
+            diff: list[str] = []
+            if missing:
+                diff.append(f"missing: {', '.join(missing)}")
+            if extra:
+                diff.append(f"extra: {', '.join(extra)}")
+            if not missing and not extra:
+                diff.append("order or duplicates do not match")
+            problems.append(
+                f".github/ISSUE_TEMPLATE/misbehaves.yml: options do not match skills/ ({'; '.join(diff)})"
+            )
     return problems
 
 
@@ -97,7 +141,7 @@ def main() -> int:
         print(f"warning: {w}")
     for p in problems:
         print(p)
-    print(f"checked {sum(1 for p in (root / 'skills').iterdir() if p.is_dir())} skills, "
+    print(f"checked {sum(1 for p in (root / 'skills').iterdir() if p.is_dir() and not p.name.startswith('.'))} skills, "
           f"{len(problems)} problem(s)")
     return 1 if problems else 0
 

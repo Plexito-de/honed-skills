@@ -11,7 +11,13 @@ from check_skills import check, warn
 GOOD = "---\nname: demo\ndescription: Use when testing.\nlicense: Apache-2.0\n---\n\n# Demo\n"
 
 
-def repo(skill_md: str = GOOD, license_file: bool = True, extra: str | None = None) -> Path:
+def repo(
+    skill_md: str = GOOD,
+    license_file: bool = True,
+    extra: str | None = None,
+    template_options: list[str] | None = None,
+    template: bool = True,
+) -> Path:
     root = Path(tempfile.mkdtemp())
     skill = root / "skills" / "demo"
     skill.mkdir(parents=True)
@@ -20,6 +26,13 @@ def repo(skill_md: str = GOOD, license_file: bool = True, extra: str | None = No
         (skill / "LICENSE").write_text("Apache-2.0")
     if extra:
         (skill / extra).write_bytes(b"\x89PNG")
+    if template:
+        options = ["demo"] if template_options is None else template_options
+        tmpl = root / ".github" / "ISSUE_TEMPLATE" / "misbehaves.yml"
+        tmpl.parent.mkdir(parents=True)
+        tmpl.write_text(
+            f"name: A skill misbehaves\nbody:\n  - type: dropdown\n    id: skill\n    attributes:\n      options: [{', '.join(options)}]\n"
+        )
     return root
 
 
@@ -36,6 +49,8 @@ class CheckSkills(unittest.TestCase):
             "shell substitution": repo(GOOD + "\nRun !`rm -rf /` now.\n"),
             "binary asset": repo(extra="shot.png"),
             "no frontmatter": repo("# Demo\n"),
+            "no misbehaves.yml template": repo(template=False),
+            "options do not match skills/": repo(template_options=["other"]),
         }
         for needle, root in cases.items():
             with self.subTest(needle):
@@ -65,6 +80,20 @@ class CheckSkills(unittest.TestCase):
         self.assertEqual(check(root), [])
         self.assertTrue(any("500 lines" in w for w in warn(root)), warn(root))
         self.assertEqual(warn(repo()), [])
+
+    def test_block_template_options_passes(self):
+        root = repo(template=False)
+        tmpl = root / ".github" / "ISSUE_TEMPLATE" / "misbehaves.yml"
+        tmpl.parent.mkdir(parents=True)
+        tmpl.write_text(
+            "name: A skill misbehaves\nbody:\n  - type: dropdown\n    id: skill\n    attributes:\n      options:\n        - demo\n"
+        )
+        self.assertEqual(check(root), [])
+
+    def test_misbehaves_options_mismatch_reports_missing_and_extra(self):
+        root = repo(template_options=["other", "extra"])
+        problems = check(root)
+        self.assertTrue(any("missing: demo" in p and "extra: extra, other" in p for p in problems), problems)
 
 
 if __name__ == "__main__":
