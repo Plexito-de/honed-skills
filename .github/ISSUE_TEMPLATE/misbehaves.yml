@@ -6,7 +6,7 @@ body:
     id: skill
     attributes:
       label: Skill
-      options: [comb-pdf-form-filling, din5008-letter, drive-audit, excalidraw, human-review, qr-code, video-to-readings]
+      options: [blockkit-forge, comb-pdf-form-filling, din5008-letter, drive-audit, excalidraw, human-review, qr-code, screenshot-callouts, screenshot-overlays, video-to-readings]
     validations:
       required: true
   - type: textarea
