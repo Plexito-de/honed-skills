@@ -330,8 +330,9 @@ def stage_inputs(paths: list[Path], sess: Path) -> list[dict]:
             sys.exit(f"no such file: {src}")
         suffix = src.suffix.lower()
         if suffix in (".pptx", ".docx"):
-            if suffix == ".docx" and not zipfile.is_zipfile(src):
-                print(f"skipping {src.name}: password-protected Word document is not a zip", file=sys.stderr)
+            if not zipfile.is_zipfile(src):
+                doc_type = "PowerPoint deck" if suffix == ".pptx" else "Word document"
+                print(f"skipping {src.name}: password-protected {doc_type} is not a zip", file=sys.stderr)
                 continue
             ident, asset = base(src.stem)
             dest = adir / f"{asset}.pdf"
@@ -348,13 +349,14 @@ def stage_inputs(paths: list[Path], sess: Path) -> list[dict]:
                 items.append({"kind": "text", "id": ident, "asset": asset,
                               "name": f"{src.stem} speaker notes", "format": "html",
                               "html": notes_html(pptx_notes(src)), "source": str(src.resolve()),
-                              "notes_of": str(src.resolve())})
+                              "notes_of": str(src.resolve()), "source_sha256": source_hash})
             else:
                 items.append({"kind": "media", "format": "pdf", "id": ident, "asset": asset,
                               "name": src.name, "url": f"/asset/{dest.name}",
                               "source": str(src.resolve()), "page_label": "page",
                               "source_sha256": source_hash})
             continue
+        source_hash = hashlib.sha256(src.read_bytes()).hexdigest()
         if suffix == ".pdf":
             ident, asset = base(src.stem)
             dest = adir / f"{asset}.pdf"
@@ -362,7 +364,8 @@ def stage_inputs(paths: list[Path], sess: Path) -> list[dict]:
                 shutil.copy2(src, dest)
             items.append({"kind": "media", "format": "pdf", "id": ident, "asset": asset,
                           "name": src.name, "url": f"/asset/{dest.name}",
-                          "source": str(src.resolve()), "page_label": "page"})
+                          "source": str(src.resolve()), "page_label": "page",
+                          "source_sha256": source_hash})
             continue
         if suffix in IMAGE_SUFFIXES:
             ident, asset = base(src.stem)
@@ -371,7 +374,8 @@ def stage_inputs(paths: list[Path], sess: Path) -> list[dict]:
                 shutil.copy2(src, dest)
             items.append({"kind": "media", "format": "image", "id": ident, "asset": asset,
                           "name": src.name, "url": f"/asset/{dest.name}",
-                          "source": str(src.resolve())})
+                          "source": str(src.resolve()),
+                          "source_sha256": source_hash})
             continue
         if suffix in TEXT_SUFFIXES:
             raw = src.read_text(errors="replace")
@@ -386,7 +390,8 @@ def stage_inputs(paths: list[Path], sess: Path) -> list[dict]:
             ident, asset = base(src.stem)
             items.append({"kind": "text", "id": ident, "asset": asset,
                           "name": src.name, "format": fmt, "html": body,
-                          "source": str(src.resolve())})
+                          "source": str(src.resolve()),
+                          "source_sha256": source_hash})
             continue
         print(f"skipping {src.name}: reviewable types are images, PDF, PowerPoint, Word, Markdown, HTML, txt",
               file=sys.stderr)
@@ -504,7 +509,11 @@ def write_outputs(sess: Path, payload: dict) -> dict:
     # Receipt: a fact other gates can read, instead of a claim that he looked.
     files = sorted({p["source"] for p in pages_out if p.get("source")})
     # The hash pins WHICH bytes were reviewed: a rebuilt deck at the same path is a new review.
-    staged_by_src = {it.get("source"): it for it in staged.values() if it.get("source")}
+    staged_by_src = {}
+    for it in staged.values():
+        src = it.get("source")
+        if src and (src not in staged_by_src or it.get("source_sha256")):
+            staged_by_src[src] = it
     hashes = {}
     for f in files:
         pf = Path(f)
@@ -1082,6 +1091,17 @@ def cmd_selftest(args) -> int:
         check("encrypted docx emits skipping warning",
               "password-protected Word document is not a zip" in err.getvalue())
 
+        # Encrypted pptx is skipped before soffice runs
+        encrypted_deck = tmp_s / "encrypted.pptx"
+        encrypted_deck.write_bytes(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"EncryptedPackage")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            enc_deck_items = stage_inputs([encrypted_deck, dummy_card], sess)
+        check("encrypted pptx is skipped before soffice runs",
+              [i["name"] for i in enc_deck_items], ["fallback.png"])
+        check("encrypted pptx emits skipping warning",
+              "password-protected PowerPoint deck is not a zip" in err.getvalue())
+
         # Setup stub soffice script
         mode_file = tmp_s / "soffice_mode"
         stub_soffice = tmp_s / "stub_soffice"
@@ -1158,6 +1178,24 @@ elif mode == "fail":
             check("pptx notes item shape",
                   (pptx_staged[1]["kind"], pptx_staged[1]["format"], pptx_staged[1].get("notes_of")),
                   ("text", "html", str(deck.resolve())))
+            check("pptx deck source_sha256 recorded at staging", bool(pptx_staged[0].get("source_sha256")), True)
+            check("pptx notes source_sha256 recorded at staging", bool(pptx_staged[1].get("source_sha256")), True)
+
+            # Modify pptx on disk and assert source snapshot warning and receipt certification
+            h_deck_staged = pptx_staged[0].get("source_sha256")
+            deck.write_bytes(b"modified deck content")
+            stderr_deck = io.StringIO()
+            with contextlib.redirect_stderr(stderr_deck):
+                write_outputs(sess, {"pages": [
+                    {"kind": "media", "item": pptx_staged[0]["id"], "page": 1, "pages": 1,
+                     "name": "test_deck.pptx, slide 1", "overview_png": "data:image/png;base64," + PNG_1PX,
+                     "crops": [], "comments": []}
+                ]})
+            receipt_deck = json.loads((sess / "receipt.json").read_text())
+            check("pptx source snapshot warns on Send when deck changed",
+                  "warning: test_deck.pptx changed on disk since review opened" in stderr_deck.getvalue(), True)
+            check("receipt certifies staged pptx hash, not modified bytes",
+                  receipt_deck["sha256"].get(str(deck.resolve())), h_deck_staged)
 
             docx_staged = stage_inputs([doc], sess)
             check("docx item count is one (pages, no notes)", len(docx_staged), 1)
@@ -1331,6 +1369,33 @@ elif mode == "fail":
               '"1.234,56"' in (sess / "marks.md").read_text())
         check("the receipt lists every reviewed file",
               len(json.loads((sess / "receipt.json").read_text())["sha256"]), 3)
+        check("card source_sha256 recorded at staging", bool(items[0].get("source_sha256")), True)
+        check("draft source_sha256 recorded at staging", bool(items[1].get("source_sha256")), True)
+        check("pdf source_sha256 recorded at staging", bool(items[2].get("source_sha256")), True)
+
+        # Modify draft.md and statement.pdf on disk, verify warning on Send and receipt certification
+        h_draft_staged = items[1]["source_sha256"]
+        h_pdf_staged = items[2]["source_sha256"]
+        draft.write_text("modified draft markdown content")
+        pdf.write_bytes(b"%PDF-1.4 modified statement bytes")
+        stderr_mod = io.StringIO()
+        with contextlib.redirect_stderr(stderr_mod):
+            write_outputs(sess, {"pages": [
+                {"kind": "text", "item": "d2", "name": "draft.md", "comments": [], "edits": []},
+                {"kind": "media", "item": "d3", "page": 1, "pages": 3, "name": "statement.pdf, page 1",
+                 "overview_png": data, "crops": [], "comments": []}
+            ]})
+        err_text = stderr_mod.getvalue()
+        receipt_mod = json.loads((sess / "receipt.json").read_text())
+        check("source snapshot warns when markdown changed on disk",
+              "warning: draft.md changed on disk since review opened" in err_text, True)
+        check("source snapshot warns when pdf changed on disk",
+              "warning: statement.pdf changed on disk since review opened" in err_text, True)
+        check("receipt certifies staged markdown hash, not modified bytes",
+              receipt_mod["sha256"].get(str(draft.resolve())), h_draft_staged)
+        check("receipt certifies staged pdf hash, not modified bytes",
+              receipt_mod["sha256"].get(str(pdf.resolve())), h_pdf_staged)
+        make_fixture_pdf(pdf, FIXTURE_PAGES)
 
         # A deck page reports the slide it came from, which is how an edit finds its way back.
         deck_items = [dict(items[2], deck=True, page_label="slide")]
