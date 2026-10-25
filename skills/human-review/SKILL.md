@@ -13,12 +13,12 @@ compatibility: >-
   PowerPoint deck or Word document (.docx) needs LibreOffice (`soffice`) to become a PDF first.
   Works offline. Agent-agnostic.
 metadata:
-  version: "1.4.0"
+  version: "1.5.0"
   changeSummary: >-
-    Word documents (.docx) can now be reviewed alongside PowerPoint decks (.pptx), images, and
-    PDFs. Converted via LibreOffice in a hardened per-file sandbox with throwaway user profile and
-    timeout. Password-protected files are skipped cleanly. Source files are snapshot-hashed at
-    staging to warn if changed before Send and keep the receipt authoritative.
+    Staging source snapshots and Send-time disk change warnings now protect all reviewable formats
+    (PDF, Markdown, HTML, text, images, PowerPoint, Word) and certify the exact viewed bytes in
+    receipt.json. Password-protected PowerPoint decks (.pptx) are detected early and skipped alongside
+    Word documents.
   isBreaking: "false"
 ---
 
@@ -260,6 +260,7 @@ the most expensive input in the loop. Do not spend it on a defect a tool can fin
   run an `onclick=` handler or a `javascript:` link, and `img-src 'self'` means a **remote image
   inside a reviewed draft does not load**. Inline it, or review a screenshot, if you need to see it.
 - A PowerPoint deck (.pptx) or Word document (.docx) needs LibreOffice (`soffice`) to become a PDF first.
+  Password-protected decks and documents are detected and skipped cleanly.
 - Word (.docx) review limits: Word comments are not rendered, tracked changes show as the document last displayed them, and a Word file is reviewed by marking and commenting, not retyping.
 - The Markdown renderer is a deliberate **subset**: headings, lists, quotes, code, tables, links,
   emphasis. Anything else stays a paragraph, and nothing disappears. Full CommonMark needs a
