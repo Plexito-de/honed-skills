@@ -91,6 +91,25 @@ cut = blockkit.cut_then_escape("abcd&efgh", 6)
 check("cut before escape keeps entities whole", cut == "abcd&amp;…")
 check("no cut when it fits", blockkit.cut_then_escape("a<b", 3) == "a&lt;b")
 
+# HTML to mrkdwn conversion.
+check("html paragraph break", blockkit.html_to_mrkdwn("<p>a</p><p>b</p>") == "a\nb")
+check("html two paragraphs is two lines", len(blockkit.html_to_mrkdwn("<p>a</p><p>b</p>").splitlines()) == 2)
+check("html paragraphs with newline whitespace", blockkit.html_to_mrkdwn("<p>a</p>\n<p>b</p>") == "a\nb")
+check("html bold conversion", blockkit.html_to_mrkdwn("<b>bold</b> and <strong>strong</strong>") == "*bold* and *strong*")
+check("html italic conversion", blockkit.html_to_mrkdwn("<i>italic</i> and <em>em</em>") == "_italic_ and _em_")
+check("html inline tags separated by space", blockkit.html_to_mrkdwn("<b>a</b> <i>b</i>") == "*a* _b_")
+check("html br tag breaks line", blockkit.html_to_mrkdwn("line 1<br>line 2") == "line 1\nline 2")
+check("html list item bullets", blockkit.html_to_mrkdwn("<ul><li>one</li><li>two</li></ul>") == "• one\n• two")
+check("html list with indented items", blockkit.html_to_mrkdwn("<ul>\n  <li>one</li>\n  <li>two</li>\n</ul>") == "• one\n• two")
+check("html valid link", blockkit.html_to_mrkdwn('<a href="https://example.com/page?x=1&y=2">click</a>') == "<https://example.com/page?x=1&amp;y=2|click>")
+check("html link encodes pipe", blockkit.html_to_mrkdwn('<a href="https://example.com/a|b">pipe</a>') == "<https://example.com/a%7Cb|pipe>")
+check("html hostile href javascript", blockkit.html_to_mrkdwn('<a href="javascript:alert(1)">evil</a>') == "evil")
+check("html hostile href closing tag", blockkit.html_to_mrkdwn('<a href="https://example.com/foo>bar">evil</a>') == "evil")
+check("html link strips invisible bidi in href", blockkit.html_to_mrkdwn('<a href="https://example.com/\u202etest">link</a>') == "<https://example.com/test|link>")
+check("html script and style dropped", blockkit.html_to_mrkdwn("hi<script>alert(1)</script><style>b{color:red}</style> there") == "hi there")
+check("html text run escaping", blockkit.html_to_mrkdwn("<p>&lt;!channel&gt; &amp; Tom & Jerry</p>") == "&lt;!channel&gt; &amp; Tom &amp; Jerry")
+check("html invisible characters stripped", blockkit.html_to_mrkdwn("a\u200bb\ufeffc\u202ad") == "abcd")
+
 # Probes and argument handling.
 check(
     "every probe carries the sentinel or level 9",
