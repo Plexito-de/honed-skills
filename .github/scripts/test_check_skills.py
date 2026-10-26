@@ -25,7 +25,9 @@ def repo(
     if license_file:
         (skill / "LICENSE").write_text("Apache-2.0")
     if extra:
-        (skill / extra).write_bytes(b"\x89PNG")
+        target = skill / extra
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"\x89PNG")
     if template:
         options = ["demo"] if template_options is None else template_options
         tmpl = root / ".github" / "ISSUE_TEMPLATE" / "misbehaves.yml"
@@ -94,6 +96,25 @@ class CheckSkills(unittest.TestCase):
         root = repo(template_options=["other", "extra"])
         problems = check(root)
         self.assertTrue(any("missing: demo" in p and "extra: extra, other" in p for p in problems), problems)
+
+    def test_binary_asset_inside_ignored_directories_passes(self):
+        for ignored_path in (
+            "node_modules/pkg/icon.png",
+            "node_modules/@scope/pkg/font.woff2",
+            ".venv/lib/site-packages/test.png",
+            ".venv-qr/lib/test.png",
+            "venv/lib/test.png",
+            "__pycache__/cached.pyc",
+            ".pytest_cache/v/cache/icon.png",
+        ):
+            with self.subTest(ignored_path):
+                self.assertEqual(check(repo(extra=ignored_path)), [])
+
+    def test_binary_asset_in_skill_source_fails(self):
+        for binary_path in ("shot.png", "assets/logo.jpg", "lib/font.woff2"):
+            with self.subTest(binary_path):
+                problems = check(repo(extra=binary_path))
+                self.assertTrue(any(f"binary asset {binary_path}" in p for p in problems), problems)
 
 
 if __name__ == "__main__":

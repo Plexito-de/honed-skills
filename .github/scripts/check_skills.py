@@ -17,10 +17,19 @@ import sys
 from pathlib import Path
 
 BINARY = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf", ".zip", ".mp4", ".mov", ".woff", ".woff2"}
+IGNORED_DIRS = {"node_modules", "__pycache__", ".git", ".pytest_cache", ".ruff_cache", ".mypy_cache"}
 # The `!`command`` form runs when an agent loads the skill. `$(...)` in a shell example does not.
 SUBSTITUTION = re.compile(r"!`[^`]+`")
 DESCRIPTION_MAX = 1024
 LINES_MAX = 500
+
+
+def is_ignored(rel_path: Path) -> bool:
+    """True when a path sits inside an ignored dependency, venv or cache directory."""
+    return any(
+        part in IGNORED_DIRS or part.startswith((".venv", "venv"))
+        for part in rel_path.parts[:-1]
+    )
 
 
 def frontmatter(text: str) -> dict[str, str] | None:
@@ -100,8 +109,13 @@ def check(root: Path) -> list[str]:
         if not (skill / "LICENSE").is_file():
             problems.append(f"{skill.name}: no LICENSE in the skill folder")
         for f in skill.rglob("*"):
+            if not f.is_file():
+                continue
+            rel = f.relative_to(skill)
+            if is_ignored(rel):
+                continue
             if f.suffix.lower() in BINARY:
-                problems.append(f"{skill.name}: binary asset {f.relative_to(skill)}; use docs/assets/")
+                problems.append(f"{skill.name}: binary asset {rel}; use docs/assets/")
     template = root / ".github" / "ISSUE_TEMPLATE" / "misbehaves.yml"
     if not template.is_file():
         problems.append(".github/ISSUE_TEMPLATE/misbehaves.yml: no misbehaves.yml template")
