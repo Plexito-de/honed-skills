@@ -95,6 +95,7 @@ The two binaries come from your package manager: `brew install qpdf poppler` on 
 ```bash
 /tmp/combfill/bin/python scripts/fill_example.py BLANK.pdf              # print field geometry
 /tmp/combfill/bin/python scripts/fill_example.py BLANK.pdf OUT.pdf      # fill, then READ the PNGs
+python3 scripts/fill_example.py --selftest                              # offline selftest (no network, no blank)
 ```
 
 It is a template to copy and re-coordinate, not a generic filler: **every coordinate in it was measured from one specific blank and will be wrong for yours.** Start by running the inspect mode against your own form and replacing the numbers and the checkbox names with what it prints.

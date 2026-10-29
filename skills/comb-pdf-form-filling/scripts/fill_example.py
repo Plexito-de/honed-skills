@@ -15,6 +15,7 @@ External: qpdf, pdftoppm (Homebrew: `brew install qpdf poppler`).
 Usage:
   python fill_example.py BLANK.pdf            # inspect: print field geometry
   python fill_example.py BLANK.pdf OUT.pdf    # fill, flatten, render; THEN READ THE PNGs
+  python fill_example.py --selftest           # offline unit tests
 """
 
 from __future__ import annotations
@@ -25,10 +26,17 @@ import sys
 import tempfile
 from pathlib import Path
 
-from pypdf import PdfReader, PdfWriter
-from pypdf.generic import BooleanObject, NameObject
-from reportlab.pdfgen import canvas
-from reportlab.pdfbase.pdfmetrics import stringWidth
+try:
+    from pypdf import PdfReader, PdfWriter
+    from pypdf.generic import BooleanObject, NameObject
+except ImportError:
+    PdfReader = PdfWriter = BooleanObject = NameObject = None
+
+try:
+    from reportlab.pdfgen import canvas
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+except ImportError:
+    canvas = stringWidth = None
 
 FF_COMB = 1 << 24  # PDF 32000-1 text-field flag 25 (Comb)
 
@@ -43,7 +51,9 @@ def inherited(obj, key):
         if key in node:
             return node[key]
         parent = node.get("/Parent")
-        node = parent.get_object() if parent is not None else None
+        if parent is None:
+            break
+        node = parent.get_object() if hasattr(parent, "get_object") else parent
         seen += 1
     return None
 
@@ -57,7 +67,9 @@ def qualified_name(obj):
         if t:
             parts.append(str(t))
         parent = node.get("/Parent")
-        node = parent.get_object() if parent is not None else None
+        if parent is None:
+            break
+        node = parent.get_object() if hasattr(parent, "get_object") else parent
         seen += 1
     return ".".join(reversed(parts)) or "(unnamed)"
 
@@ -72,9 +84,13 @@ def checkbox_on_state(obj):
     ap = obj.get("/AP")
     if not ap:
         return None
+    if hasattr(ap, "get_object"):
+        ap = ap.get_object()
     normal = ap.get("/N")
     if not normal:
         return None
+    if hasattr(normal, "get_object"):
+        normal = normal.get_object()
     states = [str(k) for k in normal.keys()]
     for s in states:
         if s != "/Off":
@@ -84,6 +100,8 @@ def checkbox_on_state(obj):
 
 # --- step 1: inspect the blank once (run, read output, then hardcode geometry) -------------
 def inspect(blank: str) -> None:
+    if PdfReader is None:
+        raise SystemExit("pypdf is required for inspect: pip install pypdf")
     reader = PdfReader(blank)
     for pageno, page in enumerate(reader.pages, start=1):
         for a in page.get("/Annots") or []:  # a page with no widgets has no /Annots key
@@ -209,6 +227,8 @@ CHECKBOX_MARKS_FLAT: tuple[tuple[float, float], ...] = ()
 
 
 def fill(blank: str, out: str) -> None:
+    if PdfReader is None or PdfWriter is None or canvas is None:
+        raise SystemExit("pypdf and reportlab are required for fill: pip install pypdf reportlab")
     out_path = Path(out)
     reader = PdfReader(blank)
     writer = PdfWriter()
@@ -281,8 +301,15 @@ def fill(blank: str, out: str) -> None:
     print("NOT make the file uneditable, and it does not prove the glyphs are in the right cells")
 
 
+def cmd_selftest() -> int:
+    selftest_path = Path(__file__).resolve().parent / "selftest.py"
+    return subprocess.run([sys.executable, "-I", str(selftest_path)]).returncode
+
+
 if __name__ == "__main__":
-    if len(sys.argv) == 2:
+    if len(sys.argv) == 2 and sys.argv[1] in ("--selftest", "selftest"):
+        sys.exit(cmd_selftest())
+    elif len(sys.argv) == 2:
         inspect(sys.argv[1])
     elif len(sys.argv) == 3:
         fill(sys.argv[1], sys.argv[2])
