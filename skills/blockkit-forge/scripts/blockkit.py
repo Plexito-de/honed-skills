@@ -5,6 +5,7 @@ Usage: python3 -I blockkit.py schema [--type T]                 # the allowed va
        python3 -I blockkit.py validate payload.json             # blocks.validate: no token, shape only
        python3 -I blockkit.py dry-post CHANNEL_ID payload.json < token-file   # each block alone, then all
        python3 -I blockkit.py cleanup CHANNEL_ID < token-file   # delete every dry-post message still queued
+       python3 -I blockkit.py selftest                          # offline checks
 
 Facts this script is built on (measured 2026-10-22 unless a doc is named):
 - `blocks.validate` is public (no token). On an invalid enum value it answers with the allowed values,
@@ -21,11 +22,15 @@ Standard library only.
 from __future__ import annotations
 
 import json
+import re
+import subprocess
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from html.parser import HTMLParser
+from pathlib import Path
 
 API = "https://slack.com/api/"
 NOPE = "__nope__"
@@ -190,6 +195,108 @@ def cut_then_escape(text: str, limit: int, mark: str = "…") -> str:
     return escape_mrkdwn(text)
 
 
+INVISIBLE_RE = re.compile(r"[\u200b-\u200d\u2060\ufeff\u202a-\u202e\u2066-\u2069]")
+BLOCK_TAGS = {
+    "p", "div", "h1", "h2", "h3", "h4", "h5", "h6",
+    "blockquote", "pre", "ul", "ol", "li", "tr", "article",
+    "section", "header", "footer",
+}
+
+
+class _MrkdwnHTMLParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.out: list[str] = []
+        self.ignore_depth = 0
+        self.link_stack: list[dict] = []
+
+    def _ensure_newline(self) -> None:
+        if self.out and not self.out[-1].endswith("\n"):
+            self.out.append("\n")
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        if tag in ("script", "style"):
+            self.ignore_depth += 1
+            return
+        if self.ignore_depth > 0:
+            return
+
+        if tag == "br":
+            self.out.append("\n")
+        elif tag in ("b", "strong"):
+            self.out.append("*")
+        elif tag in ("i", "em"):
+            self.out.append("_")
+        elif tag == "li":
+            self._ensure_newline()
+            self.out.append("• ")
+        elif tag == "a":
+            attrs_dict = dict(attrs)
+            href = INVISIBLE_RE.sub("", attrs_dict.get("href") or "").strip()
+            is_valid = (
+                href.startswith(("http://", "https://"))
+                and ">" not in href
+                and "<" not in href
+            )
+            if is_valid:
+                clean_url = escape_mrkdwn(href.replace("|", "%7C"))
+                self.link_stack.append({"url": clean_url, "start_idx": len(self.out)})
+            else:
+                self.link_stack.append({"url": None, "start_idx": len(self.out)})
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag in ("script", "style"):
+            if self.ignore_depth > 0:
+                self.ignore_depth -= 1
+            return
+        if self.ignore_depth > 0:
+            return
+
+        if tag in ("b", "strong"):
+            self.out.append("*")
+        elif tag in ("i", "em"):
+            self.out.append("_")
+        elif tag == "a" and self.link_stack:
+            link = self.link_stack.pop()
+            url = link["url"]
+            start_idx = link["start_idx"]
+            link_text = "".join(self.out[start_idx:])
+            if url:
+                del self.out[start_idx:]
+                if link_text:
+                    self.out.append(f"<{url}|{link_text}>")
+                else:
+                    self.out.append(f"<{url}>")
+        elif tag in BLOCK_TAGS:
+            self._ensure_newline()
+
+    def handle_data(self, data: str) -> None:
+        if self.ignore_depth > 0:
+            return
+        cleaned = INVISIBLE_RE.sub("", data)
+        if not cleaned:
+            return
+        if cleaned.isspace() and (not self.out or self.out[-1].endswith("\n")):
+            return
+        self.out.append(escape_mrkdwn(cleaned))
+
+
+def html_to_mrkdwn(html_text: str) -> str:
+    """Convert an HTML snippet into mrkdwn.
+
+    Block tags end a line at their END only (<p>a</p><p>b</p> is two lines, not three),
+    <br> breaks, <b>/<strong> becomes *, <i>/<em> becomes _, <li> becomes •,
+    <a href> becomes <url|text> for http(s) only (hostile href never becomes a link),
+    script and style are dropped, every text run is escaped, and invisible characters are removed.
+    """
+    parser = _MrkdwnHTMLParser()
+    parser.feed(html_text)
+    parser.close()
+    return "".join(parser.out).strip("\n")
+
+
 def printable(label: str) -> str:
     return "".join(c if c.isprintable() else "?" for c in label)[:32]
 
@@ -346,6 +453,11 @@ def cmd_cleanup(channel: str) -> int:
     return 1 if errors else 0
 
 
+def cmd_selftest() -> int:
+    selftest_path = Path(__file__).resolve().parent / "selftest.py"
+    return subprocess.run([sys.executable, "-I", str(selftest_path)]).returncode
+
+
 def usage() -> int:
     print(__doc__.split("\n\n")[0], file=sys.stderr)
     return 2
@@ -363,6 +475,8 @@ def main(argv: list[str]) -> int:
             return cmd_dry_post(channel, path)
         case ["cleanup", channel]:
             return cmd_cleanup(channel)
+        case ["selftest"] | ["--selftest"]:
+            return cmd_selftest()
     return usage()
 
 

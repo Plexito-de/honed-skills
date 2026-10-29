@@ -95,9 +95,9 @@ number in it is invented. `scripts/make_illustration.py` draws it, and
 
 ## Scripts
 
-- `scripts/blockkit.py schema [--type T]`, `validate FILE`, `dry-post CHANNEL FILE`, `cleanup CHANNEL`
-  (token on stdin). Retries a rate limit, refuses redirects, and exits non-zero on any failure.
-  `escape_mrkdwn` and `cut_then_escape` are importable reference implementations of step 3.
+- `scripts/blockkit.py schema [--type T]`, `validate FILE`, `dry-post CHANNEL FILE`, `cleanup CHANNEL`,
+  `selftest` (token on stdin). Retries a rate limit, refuses redirects, and exits non-zero on any failure.
+  `escape_mrkdwn`, `cut_then_escape` and `html_to_mrkdwn` are importable reference implementations of step 3.
 - `scripts/selftest.py`: offline checks of the enum parser, loading, escaping, argument handling, the
   retry, the token guard and every dry-post failure path. No network.
 - `scripts/make_illustration.py`: draws the example picture (Pillow).
