@@ -11,7 +11,7 @@ Usage:
     python3 overlays.py list  BASE.png DONOR.png --sheet SHEET.png [--offset=DX,DY | --anchor X0,Y0,X1,Y1]
     python3 overlays.py merge BASE.png DONOR.png (--pick 2[,5] | --region X0,Y0,X1,Y1) [--rect]
                               [--offset=DX,DY | --anchor X0,Y0,X1,Y1] [--proof PROOF.png] --out OUT.png
-    python3 overlays.py --selftest
+    python3 overlays.py --selftest (or selftest)
     Every command also takes --edge N (default 16) and --max-shift N (default 96).
 
 Coordinates are BASE pixels. The offset (dx, dy) means BASE(x, y) shows what DONOR(x + dx, y + dy)
@@ -746,6 +746,7 @@ def merge(base, donor, al: Alignment, boxes, rect: bool, edge: int = EDGE):
     warped, valid = donor_in_base(base, donor, al)
     out = base.copy()
     report = []
+    boxes = list(dict.fromkeys(boxes))
     for box in boxes:
         mask, solid = overlay_mask(base, warped, valid, box, rect, edge)
         if not mask.any():
@@ -893,6 +894,7 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="overlays.py", description=__doc__.splitlines()[0])
     p.add_argument("--selftest", action="store_true")
     sub = p.add_subparsers(dest="cmd")
+    sub.add_parser("selftest", help="run the offline selftest")
     for name in ("align", "list", "merge"):
         s = sub.add_parser(name)
         s.add_argument("base", type=Path)
@@ -919,7 +921,7 @@ def main(argv: list[str] | None = None) -> int:
         args = p.parse_args(argv)
     except SystemExit as exc:
         return 2 if exc.code else 0
-    if args.selftest:
+    if args.selftest or args.cmd == "selftest":
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         from selftest import selftest
 
@@ -984,10 +986,11 @@ def main(argv: list[str] | None = None) -> int:
                 boxes = [check_box(tuple(args.region), base.shape)]
             else:
                 found = {x.n: x for x in components(base, donor, al, args.edge)}
-                missing = [n for n in args.pick if n not in found]
+                picks = list(dict.fromkeys(args.pick))
+                missing = [n for n in picks if n not in found]
                 if missing:
                     raise Refused(f"no component numbered {missing}; run `list` with the same options")
-                boxes = [(found[n].x0, found[n].y0, found[n].x1, found[n].y1) for n in args.pick]
+                boxes = [(found[n].x0, found[n].y0, found[n].x1, found[n].y1) for n in picks]
             out, report = merge(base, donor, al, boxes, args.rect, args.edge)
             rival = list(al.rival) if al.rival else None
             how = "given with --offset" if offset else f"anchored on {args.anchor}" if args.anchor else f"searched, rival {rival}"

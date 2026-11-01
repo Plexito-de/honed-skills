@@ -698,6 +698,8 @@ def selftest() -> int:
         outside = np.ones(base.shape[:2], dtype=bool)
         outside[40:170, 120:260] = False
         check("a paste never leaves the box it was given", np.array_equal(out[outside], base[outside]))
+        _, report_dup = merge(base, donor, al, [(120, 40, 260, 170), (120, 40, 260, 170)], False)
+        check("merge deduplicates identical boxes", len(report_dup) == 1)
         check("--rect refuses a box the DONOR does not fully cover", refuses(lambda: merge(base, donor, al, [(880, 10, 900, 40)], True)))
         ghost = donor.copy()
         ghost[600:690, 0:300, 3] = 0
@@ -810,6 +812,13 @@ def selftest() -> int:
                 check("the merge records its offset in the PNG comment", "offset (-7, 11) searched" in im.info.get("Comment", ""), im.info.get("Comment", "")[:120])
             with Image.open(t / "pf.png") as im:
                 check("--proof writes the DONOR above the result", im.width > 200 and im.height > 60, str(im.size))
+            out_dup = io.StringIO()
+            with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(out_dup):
+                rc_dup = main(["merge", str(t / "bi.png"), str(t / "di.png"), "--pick", "1,1", "--out", str(t / "mdup.png"), "--proof", str(t / "pfdup.png")])
+            dup_report = json.loads(out_dup.getvalue().splitlines()[0]) if out_dup.getvalue() else {}
+            check("--pick deduplicates component numbers", rc_dup == 0 and len(dup_report.get("pasted", [])) == 1)
+            with Image.open(t / "pf.png") as im_single, Image.open(t / "pfdup.png") as im_dup:
+                check("deduplicated pick produces identical proof sheet height", im_dup.size == im_single.size)
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                 rc = main(["merge", str(t / "bi.png"), str(t / "di.png"), "--pick", "1", "--out", str(t / "same.png"), "--proof", str(t / "same.png")])
             check("--proof and --out may not name the same file", rc == 2 and not (t / "same.png").exists(), str(rc))
