@@ -243,7 +243,7 @@ def clean_text(value: str, field: str, limit: int) -> str:
 
 def clean_iban(value: str) -> tuple[str, str]:
     """Drop the print grouping, then check country, length and the mod-97 check digits."""
-    iban = value.replace(" ", "").upper()
+    iban = "".join(value.split()).upper()
     if not re.fullmatch(r"[A-Z]{2}[0-9]{2}[A-Z0-9]+", iban):  # ASCII digits only, never \d
         raise Refused("IBAN: a country code, two check digits, then letters or digits")
     country = iban[:2]
@@ -263,7 +263,7 @@ def clean_bic(value: str | None, country: str) -> str:
                 f"BIC: required for a {country} IBAN, because {country} is outside the EEA"
             )
         return ""
-    bic = value.strip().upper()
+    bic = "".join(value.split()).upper()
     if not re.fullmatch(r"[A-Z]{4}[A-Z]{2}[A-Z0-9]{2}(?:[A-Z0-9]{3})?", bic):
         raise Refused("BIC: 8 or 11 characters (bank, country, location, optional branch)")
     return bic
@@ -284,15 +284,16 @@ def clean_amount(value: str | None) -> str:
 
 def clean_reference(value: str) -> str:
     """Up to 35 characters. Only an ISO 11649 creditor reference (RF...) carries a checksum."""
-    reference = clean_text(value, "reference", 35)
-    if reference.startswith("RF"):
-        if not re.fullmatch(r"RF[0-9]{2}[A-Za-z0-9]{1,21}", reference):
+    compact = "".join(value.split()).upper()
+    if compact.startswith("RF"):
+        if not re.fullmatch(r"RF[0-9]{2}[A-Za-z0-9]{1,21}", compact):
             raise Refused(
                 "reference: an RF reference is RF, two check digits, 1 to 21 letters or digits"
             )
-        if mod97(reference[4:].upper() + reference[:4]) != 1:
+        if mod97(compact[4:].upper() + compact[:4]) != 1:
             raise Refused("reference: the RF check digits do not match (ISO 11649 mod-97)")
-    return reference
+        return compact
+    return clean_text(value, "reference", 35)
 
 
 def clean_purpose(value: str) -> str:
@@ -995,13 +996,11 @@ def show(fields: list[str]) -> None:
         print(f"{number:3d} {label:15s} {printable(value)}")
 
 
-def main(argv: list[str] | None = None) -> int:
-    for stream in (sys.stdout, sys.stderr):
-        if hasattr(stream, "reconfigure"):
-            stream.reconfigure(encoding="utf-8")  # a Windows console would print cp1252 otherwise
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="QR code, EPC payment code or card, decode-proven")
     parser.add_argument("--selftest", action="store_true", help="offline tests, then exit")
     sub = parser.add_subparsers(dest="command")
+    sub.add_parser("selftest", help="offline tests, then exit")
     text = sub.add_parser("text", help="any one line of text, such as a URL, optionally on a card")
     text.add_argument("--data", required=True, help="the text to encode, exactly")
     text.add_argument("--logo", type=Path, help="an image for the center (forces level H)")
@@ -1033,9 +1032,17 @@ def main(argv: list[str] | None = None) -> int:
     cut.add_argument(
         "--modules", type=int, default=CUTOUT_MODULES, help="crop width in code modules"
     )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")  # a Windows console would print cp1252 otherwise
+    parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        if args.selftest:
+        if args.selftest or args.command == "selftest":
             return selftest()
         if args.command == "text":
             print(
@@ -1196,6 +1203,24 @@ def selftest() -> int:
     check(
         "non-RF reference",
         build_payload(**base, reference="Invoice 2026-042").endswith("Invoice 2026-042"),
+    )
+    check(
+        "IBAN with print grouping, non-breaking spaces and tabs",
+        build_payload(name="A", iban="DE89\u00a03704\u202f0044\t0532 0130 00").endswith("\nDE89370400440532013000"),
+    )
+    check(
+        "BIC with grouping spaces",
+        build_payload(name="A", iban="CH9300762011623852957", bic="UBSW CH ZH 80A").startswith(
+            "BCD\n002\n1\nSCT\nUBSWCHZH80A\n"
+        ),
+    )
+    check(
+        "RF reference with grouping spaces",
+        build_payload(**base, reference="RF18 5390 0754 7034").endswith("\nRF18539007547034"),
+    )
+    check(
+        "parser accepts selftest subcommand",
+        build_parser().parse_args(["selftest"]).command == "selftest",
     )
     refused("purpose form", **base, purpose="gdds")
     for label, bad in (
