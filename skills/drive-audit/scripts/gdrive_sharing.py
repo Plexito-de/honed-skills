@@ -314,14 +314,20 @@ def load_policy(path: Path | None = None) -> Policy:
 
 
 def policy_from_dict(data: dict[str, Any], source: str) -> Policy:
-    def keyed(rows: Iterable[dict[str, Any]], key: str) -> dict[str, dict[str, Any]]:
-        return {str(row[key]): row for row in rows if row.get(key)}
+    def keyed(
+        rows: Iterable[dict[str, Any]], key: str, lower: bool = False
+    ) -> dict[str, dict[str, Any]]:
+        return {
+            (str(row[key]).lower() if lower else str(row[key])): row
+            for row in rows
+            if row.get(key)
+        }
 
     return Policy(
-        principals=keyed(data.get("approved_principal", []), "email"),
+        principals=keyed(data.get("approved_principal", []), "email", lower=True),
         public=keyed(data.get("approved_public", []), "file_id"),
         trees=keyed(data.get("approved_tree", []), "folder_id"),
-        domains=keyed(data.get("approved_domain", []), "domain"),
+        domains=keyed(data.get("approved_domain", []), "domain", lower=True),
         source=source,
     )
 
@@ -408,7 +414,7 @@ def classify(
                 permission_id=permission.get("id", ""),
                 kind=kind,
                 role=permission.get("role", ""),
-                principal=email or permission.get("domain") or "anyone",
+                principal=email or (permission.get("domain") or "").lower() or "anyone",
                 inherited=_is_inherited(permission),
                 expiration_time=permission.get("expirationTime"),
                 view=permission.get("view"),
@@ -1639,6 +1645,44 @@ def selftest() -> int:
             "escalated writer NOT suppressed",
             [f.approved for f in classify([item(permissions=[writer])], pol, me)],
             [False],
+        )
+    )
+
+    # Policy matching for principals and domains is case-insensitive.
+    mixed_pol = policy_from_dict(
+        {
+            "approved_principal": [
+                {
+                    "email": "Tax.Advisor@Example.COM",
+                    "reason": "tax advisor",
+                    "since": "2026-01-01",
+                    "roles": ["reader"],
+                }
+            ],
+            "approved_domain": [
+                {
+                    "domain": "Partner.ORG",
+                    "reason": "trusted partner",
+                    "since": "2026-01-01",
+                }
+            ],
+        },
+        "test",
+    )
+    mixed_user = {"id": "p", "type": "user", "role": "reader", "emailAddress": "tax.advisor@example.com"}
+    mixed_domain = {"id": "d", "type": "domain", "role": "reader", "domain": "PARTNER.org"}
+    cases.append(
+        (
+            "approved mixed-case principal suppressed",
+            [f.approved for f in classify([item(permissions=[mixed_user])], mixed_pol, me)],
+            [True],
+        )
+    )
+    cases.append(
+        (
+            "approved mixed-case domain suppressed",
+            [f.approved for f in classify([item(permissions=[mixed_domain])], mixed_pol, me)],
+            [True],
         )
     )
 
