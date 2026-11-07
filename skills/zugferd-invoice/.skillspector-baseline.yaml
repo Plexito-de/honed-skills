@@ -1,0 +1,13 @@
+version: 2
+
+rules:
+  - id: "LP3"
+    path: "SKILL.md"
+    reason: >-
+      No allowed-tools declaration, on purpose. A skill that declares its own tool scope
+      pre-approves those tools inside your agent, which removes your permission decision instead of
+      informing it, so this repository forbids the field.
+  - id: "AST4"
+    path: "scripts/invoice.py"
+    reason: >-
+      Standard library Python only.
