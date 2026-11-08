@@ -161,7 +161,7 @@ def render_markdown(src: str) -> str:
             tag = "ol" if ordered else "ul"
             out.append(f"<{tag}>" + "".join(f"<li>{x}</li>" for x in items) + f"</{tag}>")
             continue
-        buf = []
+        buf = [line]; i += 1
         while i < n and lines[i].strip() and not is_block_start(lines[i]):
             buf.append(lines[i]); i += 1
         out.append("<p>" + inline(" ".join(buf)) + "</p>")
@@ -1072,6 +1072,9 @@ def cmd_selftest(args) -> int:
     code_star = render_markdown("Run `ls *` or `cat *` now.")
     check("asterisks inside inline code not parsed as emphasis",
           "<p>Run <code>ls *</code> or <code>cat *</code> now.</p>" == code_star)
+    check("non-block line starting with block characters renders as paragraph",
+          (render_markdown(" | not a table"), render_markdown("#hashtag"), render_markdown("|x")),
+          ('<p> | not a table</p>', '<p>#hashtag</p>', '<p>|x</p>'))
 
     ok = {"Host": "127.0.0.1:8000"}
     origin_cases = (
