@@ -10,7 +10,7 @@ description: >-
 license: Apache-2.0
 compatibility: >-
   Requires Python 3.11+ with google-auth and google-api-python-client for anything that talks to
-  Drive. The classifier and its 53-case selftest are standard library only and run with no
+  Drive. The classifier and its 55-case selftest are standard library only and run with no
   credentials at all. Credentials come from Application Default Credentials, a service-account
   key named by an environment variable, or a command that prints one; no product-specific tooling
   and no agent-specific paths.
@@ -315,7 +315,7 @@ A revoke that leaves the publisher running is a chore you have scheduled forever
 ## Verify before you believe it
 
 ```bash
-drive-audit --selftest      # 53 cases, no credentials, no network, no Google libraries
+drive-audit --selftest      # 55 cases, no credentials, no network, no Google libraries
 ```
 
 That it runs with no credentials is the point: the classification logic is checkable before this
@@ -353,7 +353,7 @@ thousands of items. The measurements in this file were taken on real runs rather
 inheritance-id finding, the 404 rate on a resumed sweep, the orphaned-grant dead end, and the share
 of a visibility query that turns out to be other people's files.
 
-What ships here is verifiable without credentials: `scripts/drive-audit --selftest` is 53 offline
+What ships here is verifiable without credentials: `scripts/drive-audit --selftest` is 55 offline
 cases over the classifier, the policy engine and the ordering, and `scripts/example_report.py` prints
 a full report from invented findings. Both the severity split and the policy escalation guard were
 falsified by mutation rather than only confirmed, which is a stronger claim than a passing suite: the
