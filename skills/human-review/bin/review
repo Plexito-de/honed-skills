@@ -88,11 +88,30 @@ def render_markdown(src: str) -> str:
     """
     def inline(t: str) -> str:
         t = html_mod.escape(t)
-        t = re.sub(r"`([^`]+)`", r"<code>\1</code>", t)
+        code_spans: list[str] = []
+        def save_code(m):
+            code_spans.append(f"<code>{m.group(1)}</code>")
+            return f"\x00code{len(code_spans)-1}\x00"
+        t = re.sub(r"`([^`]+)`", save_code, t)
         t = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", t)
         t = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"<em>\1</em>", t)
         t = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', t)
+        for idx, span in enumerate(code_spans):
+            t = t.replace(f"\x00code{idx}\x00", span)
         return t
+
+    def is_block_start(s: str) -> bool:
+        if s.startswith(("#", "```")):
+            return True
+        if re.match(r"^\s*>", s):
+            return True
+        if s.lstrip().startswith("|"):
+            return True
+        if re.match(r"^\s*([-*_])\1{2,}\s*$", s):
+            return True
+        if re.match(r"^\s*[-*+]\s+", s) or re.match(r"^\s*\d+[.)]\s+", s):
+            return True
+        return False
 
     out: list[str] = []
     lines = src.splitlines()
@@ -142,8 +161,8 @@ def render_markdown(src: str) -> str:
             tag = "ol" if ordered else "ul"
             out.append(f"<{tag}>" + "".join(f"<li>{x}</li>" for x in items) + f"</{tag}>")
             continue
-        buf = []
-        while i < n and lines[i].strip() and not lines[i].startswith(("#", "```", ">", "|")):
+        buf = [line]; i += 1
+        while i < n and lines[i].strip() and not is_block_start(lines[i]):
             buf.append(lines[i]); i += 1
         out.append("<p>" + inline(" ".join(buf)) + "</p>")
     return "\n".join(out)
@@ -1047,6 +1066,15 @@ def cmd_selftest(args) -> int:
     check("html body keeps content and drops script", "keep" in body and "drop" not in body)
     tbl = render_markdown("| a | b |\n|---|---|\n| 1 | 2 |\n")
     check("markdown table", "<th>a</th>" in tbl and "<td>2</td>" in tbl)
+    para_list = render_markdown("Intro text.\n- item 1\n- item 2\n---\nOutro.")
+    check("paragraph before list and hr separated",
+          "<p>Intro text.</p>\n<ul><li>item 1</li><li>item 2</li></ul>\n<hr>\n<p>Outro.</p>" in para_list)
+    code_star = render_markdown("Run `ls *` or `cat *` now.")
+    check("asterisks inside inline code not parsed as emphasis",
+          "<p>Run <code>ls *</code> or <code>cat *</code> now.</p>" == code_star)
+    check("non-block line starting with block characters renders as paragraph",
+          (render_markdown(" | not a table"), render_markdown("#hashtag"), render_markdown("|x")),
+          ('<p> | not a table</p>', '<p>#hashtag</p>', '<p>|x</p>'))
 
     ok = {"Host": "127.0.0.1:8000"}
     origin_cases = (
