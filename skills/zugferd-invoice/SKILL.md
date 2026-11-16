@@ -1,8 +1,8 @@
 ---
 name: zugferd-invoice
-description: Use when creating, attaching, extracting, or validating a Factur-X / ZUGFeRD 2.2 hybrid electronic invoice (PDF/A-3b with embedded factur-x.xml conforming to EN 16931). Conforms to European e-invoicing standards for B2B and B2G. Generates compliant CrossIndustryInvoice XML from structured invoice data, embeds factur-x.xml into a visual invoice PDF with PDF/A-3 metadata, output intent, and catalog /AF relationships, extracts embedded XML from incoming hybrid invoices, and validates invoice totals, tax calculations, and veraPDF PDF/A-3b clause invariants. Standard library only, no external dependencies.
+description: Use when creating, attaching, extracting, or validating a Factur-X / ZUGFeRD 2.2 hybrid electronic invoice (PDF/A-3b with embedded factur-x.xml conforming to EN 16931). Conforms to European e-invoicing standards for B2B and B2G. Generates compliant CrossIndustryInvoice XML from structured invoice data, embeds factur-x.xml into a visual invoice PDF with PDF/A-3 metadata, output intent, and catalog /AF relationships, extracts embedded XML from incoming hybrid invoices, and validates invoice totals, tax calculations, and veraPDF PDF/A-3b clause invariants.
 license: Apache-2.0
-compatibility: Python 3.10+, standard library only. Agent-agnostic.
+compatibility: Requires Python 3.10+ with factur-x 7.9 and pypdf 7.0.0 in a virtual environment. Base PDF rendered with WeasyPrint 70.0+ (pdf_variant="pdf/a-3b"). No network, no account. Agent-agnostic.
 metadata:
   version: "1.0.0"
 ---
@@ -27,36 +27,51 @@ WeasyPrint pdf/a-3b + factur-x
   compliant, 146 rules passed
 ```
 
-This skill provides a pure Python standard library engine to generate compliant EN 16931 XML,
-attach it to existing PDF invoices with exact PDF/A-3b catalog and XMP metadata, extract embedded
-invoices from incoming files, and verify mathematical and structural compliance against veraPDF clauses.
+This skill uses the pinned reference `factur-x` engine and `pypdf` to parse object streams,
+preserve the DeviceRGB ICC output intent, inject exact PDF/A-3b catalog `/AF` bindings, generate
+EN 16931 compliant line items and tax breakdown, and verify structural and mathematical invariants
+without false greens.
 
 ## Modes
 
 - **`pack`**: Generates a valid Factur-X / ZUGFeRD 2.2 XML file (`factur-x.xml`) conforming to EN 16931
-  from structured JSON invoice data and attaches it to a PDF.
-- **`attach`**: Takes an existing visual PDF invoice and an XML invoice file, embeds the XML into the PDF
-  with PDF/A-3b conformance metadata, `/AF` catalog array, and `/AFRelationship /Alternative`.
+  with mandatory line items, embeds it into a PDF/A-3 base invoice, and verifies the result.
+- **`attach`**: Embeds existing `factur-x.xml` into a base PDF/A-3 invoice via pinned `factur-x`
+  with `/AFRelationship /Alternative`.
 - **`extract`**: Extracts the embedded `factur-x.xml` from an incoming hybrid invoice PDF to disk.
-- **`verify`**: Inspects a PDF or XML invoice, checking veraPDF PDF/A-3b clauses (`6.8-1..4`, `6.2.4.3-2`,
-  `6.1.3-1`, `6.6.2.1-1`), line item sums, and KoSIT EN 16931 business rules (`BR-01`, `BR-CO-15`).
+- **`verify`**: Inspects a hybrid invoice, verifying that the PDF structure and pages parse cleanly,
+  the embedded XML passes official EN 16931 XSD validation, and business rules (`[BR-01]`, `[BR-CO-15]`) hold.
 - **`selftest`**: Runs the offline selftest suite validating end-to-end invoice generation, attachment,
   extraction, round-trip equality, and exact clause refusals.
 
-## Usage
+## Install
 
-All commands run with Python 3.10+ without external packages:
+In a virtual environment with Python 3.10+:
 
 ```bash
-python3 skills/zugferd-invoice/scripts/invoice.py --selftest
+python3 -m venv .venv-invoice
+.venv-invoice/bin/python -m pip install factur-x==7.9 pypdf==7.0.0
+.venv-invoice/bin/python scripts/invoice.py --selftest
 ```
+
+The selftest runs offline and must end with `zugferd-invoice selftest: N/N checks pass`.
+
+| Exit code | Meaning |
+| --- | --- |
+| 0 | Verified, generated, or extracted successfully |
+| 1 | Refused: invalid mathematical totals, missing required fields, or non-compliant XML |
+| 2 | Usage error, missing argument, or file not found |
+| 3 | Dependency missing (`factur-x` or `pypdf` not installed in environment) |
+| 4 | Proof failed: PDF structure corrupt, XSD validation error, or invariant violation |
+
+## Usage
 
 ### 1. Generating Factur-X XML and Packing (`pack`)
 
 Pass a JSON file containing the invoice header, seller, buyer, line items, and tax rates:
 
 ```bash
-python3 skills/zugferd-invoice/scripts/invoice.py pack \
+python3 scripts/invoice.py pack \
     --pdf print_invoice.pdf \
     --data invoice.json \
     --out hybrid_invoice.pdf
@@ -69,7 +84,6 @@ Expected JSON format:
   "number": "INV-2026-0042",
   "date": "2026-11-07",
   "currency": "EUR",
-  "profile": "EN 16931",
   "seller": {
     "name": "Acme Solutions GmbH",
     "vat_id": "DE123456789"
@@ -81,7 +95,11 @@ Expected JSON format:
   "lines": [
     {
       "name": "Cloud Engineering Consulting",
-      "amount": 1000.00
+      "quantity": 1.0,
+      "unit_price": 1000.00,
+      "amount": 1000.00,
+      "unit_code": "C62",
+      "tax_percent": 19.0
     }
   ],
   "net": 1000.00,
@@ -95,38 +113,32 @@ Expected JSON format:
 When you already have a visual invoice PDF produced by WeasyPrint (`pdf_variant="pdf/a-3b"`):
 
 ```bash
-python3 skills/zugferd-invoice/scripts/invoice.py attach \
+python3 scripts/invoice.py attach \
     --pdf print_invoice.pdf \
     --xml factur-x.xml \
-    --out hybrid_invoice.pdf \
-    --profile "EN 16931"
+    --out hybrid_invoice.pdf
 ```
 
-This updates the PDF with:
+The pinned engine embeds `factur-x.xml` while preserving the ICC output intent and adding:
 1. `Clause 6.8-1`: Embedded stream with `/Subtype /text#2Fxml`.
 2. `Clause 6.8-2` & `6.8-3`: File specification dictionary with `/F`, `/UF` and `/AFRelationship /Alternative`.
 3. `Clause 6.8-4`: Document Catalog `/AF` array pointing to the file specification.
-4. `Clause 6.6.2.1-1`: XMP metadata stream asserting PDF/A-3b (`pdfaid:part="3"`, `pdfaid:conformance="B"`)
-   and Factur-X extension schema declaration.
-5. `Clause 6.2.4.3-2`: Preserved or injected `/OutputIntents` dictionary with ICC profile.
-6. `Clause 6.1.3-1`: Trailer `/ID` array with matching file identifiers.
+4. `Clause 6.6.2.1-1`: XMP metadata stream declaring PDF/A-3b and Factur-X extension schema.
 
 ### 3. Extracting XML from an Incoming Hybrid Invoice (`extract`)
 
 To inspect or process an invoice received from a supplier:
 
 ```bash
-python3 skills/zugferd-invoice/scripts/invoice.py extract received_invoice.pdf --out supplier_factur-x.xml
+python3 scripts/invoice.py extract received_invoice.pdf --out supplier_factur-x.xml
 ```
-
-Prints the extracted profile, invoice number, and writes the exact XML payload.
 
 ### 4. Verifying an Invoice (`verify`)
 
-Check both the visual wrapper and the embedded XML for structural integrity and mathematical correctness:
+Check both the visual wrapper and the embedded XML without false greens:
 
 ```bash
-python3 skills/zugferd-invoice/scripts/invoice.py verify hybrid_invoice.pdf
+python3 scripts/invoice.py verify hybrid_invoice.pdf
 ```
 
 Output:
@@ -135,18 +147,9 @@ VALID Factur-X EN 16931 (sha256=a1b2c3d4e5f60718...)
 ```
 
 Invariants checked:
-- `veraPDF [6.1.3-1]`: Trailer contains matching `/ID` array.
-- `veraPDF [6.2.4.3-2]`: Color output intent present for DeviceRGB.
-- `veraPDF [6.8-1]`: Embedded stream carries `/Subtype /text#2Fxml`.
-- `veraPDF [6.8-2]`: File specification contains `/UF` key.
-- `veraPDF [6.8-3]`: File specification carries `/AFRelationship /Alternative`.
+- `pypdf` structural parse: valid xref, non-empty pages list, and `/Root` catalog.
 - `veraPDF [6.8-4]`: Document catalog contains `/AF` array.
-- `veraPDF [6.6.2.1-1]`: Valid PDF/A-3b and Factur-X XMP extension schema.
-- `KoSIT [BR-01]`: Guideline URN is `urn:cen.eu:en16931:2017#compliant#urn:factur-x.eu:1p0:en16931`.
-- `KoSIT [BR-CO-15]`: Grand total equals net plus tax.
-
-| Exit code | Meaning |
-| --- | --- |
-| 0 | Verified, generated, or extracted successfully |
-| 1 | Refused: invalid mathematical totals, missing required fields, or non-compliant PDF |
-| 2 | Usage error, missing argument, or file not found |
+- `facturx` extraction: extracts `factur-x.xml` from stream without failure.
+- `facturx.xml_check_xsd`: validates embedded XML against official EN 16931 XSD schemas.
+- `KoSIT [BR-01]`: Guideline URN is `urn:cen.eu:en16931:2017`.
+- `KoSIT [BR-CO-15]`: Line item amounts sum to net, and net plus tax equals grand total.
