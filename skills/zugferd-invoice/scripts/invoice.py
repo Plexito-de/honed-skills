@@ -5,7 +5,7 @@
 
 Purpose:
     Generates and proves Factur-X / ZUGFeRD 2.2 hybrid e-invoices conforming to EN 16931 and
-    ISO 19005-3 (PDF/A-3b). Evaluated against veraPDF 1.30.4 (-f 3b) and the KoSIT Prüftool.
+    ISO 19005-3 (PDF/A-3b). Evaluated against veraPDF 1.30.4 (-f 3b) and CEN EN16931-CII Schematron.
 
 Usage:
     python3 invoice.py pack --pdf input.pdf --data invoice.json --out hybrid.pdf
@@ -19,7 +19,7 @@ Exit codes:
     1: refused (input breaks a rule or math discrepancy)
     2: usage error or missing file
     3: dependency missing
-    4: proof failed (PDF/A-3b or XSD validation failure)
+    4: proof failed (PDF/A-3b, XSD validation, or business rule failure)
 
 Requires Python 3.10+ with factur-x==7.9 and pypdf==7.0.0.
 """
@@ -37,7 +37,6 @@ from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 
 EN16931_URN = "urn:cen.eu:en16931:2017"
-EN16931_EXTENDED_URN = "urn:cen.eu:en16931:2017#compliant#urn:factur-x.eu:1p0:en16931"
 DEFAULT_PROFILE = "EN 16931"
 DEFAULT_FILENAME = "factur-x.xml"
 
@@ -81,6 +80,27 @@ def build_facturx_xml(data: dict) -> bytes:
     lines_data = data.get("lines", [])
     if not lines_data:
         raise Refused("invoice must contain at least one line item")
+
+    # Validate postal country codes (BR-08, BR-09, BR-10, BR-11)
+    seller_addr = data["seller"].get("address", {})
+    seller_country = (
+        data["seller"].get("country")
+        or data["seller"].get("country_id")
+        or seller_addr.get("country")
+        or seller_addr.get("country_id")
+    )
+    if not seller_country:
+        raise Refused("KoSIT [BR-09]: seller postal address must contain a country code (country)")
+
+    buyer_addr = data["buyer"].get("address", {})
+    buyer_country = (
+        data["buyer"].get("country")
+        or data["buyer"].get("country_id")
+        or buyer_addr.get("country")
+        or buyer_addr.get("country_id")
+    )
+    if not buyer_country:
+        raise Refused("KoSIT [BR-11]: buyer postal address must contain a country code (country)")
 
     rsm = ET.Element(
         "rsm:CrossIndustryInvoice",
@@ -164,6 +184,14 @@ def build_facturx_xml(data: dict) -> bytes:
             tax_breakdown[key] = {"basis": Decimal("0.00"), "tax": Decimal("0.00")}
         tax_breakdown[key]["basis"] += line_amount
 
+    # KoSIT [BR-CO-10]: Validate line sums vs net
+    if "net" in data and quantize(data["net"]) != calculated_line_net:
+        raise Refused(
+            f"KoSIT [BR-CO-10]: sum of invoice line net amounts ({calculated_line_net:.2f}) "
+            f"does not match net ({quantize(data['net']):.2f})"
+        )
+    net_val = calculated_line_net
+
     # Compute tax amounts for each category
     total_tax = Decimal("0.00")
     for key, val in tax_breakdown.items():
@@ -172,10 +200,15 @@ def build_facturx_xml(data: dict) -> bytes:
         val["tax"] = tax_amt
         total_tax += tax_amt
 
-    net_val = quantize(data.get("net", calculated_line_net))
-    tax_val = quantize(data.get("tax", total_tax))
+    # KoSIT [BR-CO-14]: Validate tax total vs sum of VAT category tax amounts
+    if "tax" in data and quantize(data["tax"]) != total_tax:
+        raise Refused(
+            f"KoSIT [BR-CO-14]: total VAT amount ({quantize(data['tax']):.2f}) "
+            f"does not match sum of VAT category tax amounts ({total_tax:.2f})"
+        )
+    tax_val = total_tax
 
-    # KoSIT BR-CO-15: GrandTotalAmount = TaxBasisTotalAmount + TaxTotalAmount
+    # KoSIT [BR-CO-15]: GrandTotalAmount = TaxBasisTotalAmount + TaxTotalAmount
     expected_total = quantize(net_val + tax_val)
     if total_val != expected_total:
         raise Refused(
@@ -187,12 +220,40 @@ def build_facturx_xml(data: dict) -> bytes:
     agr = ET.SubElement(tx, "ram:ApplicableHeaderTradeAgreement")
     seller = ET.SubElement(agr, "ram:SellerTradeParty")
     ET.SubElement(seller, "ram:Name").text = data["seller"].get("name", "Seller")
+
+    # PostalTradeAddress for Seller (BR-08, BR-09)
+    s_postal = ET.SubElement(seller, "ram:PostalTradeAddress")
+    s_postcode = data["seller"].get("postal_code") or data["seller"].get("postcode") or seller_addr.get("postcode")
+    if s_postcode:
+        ET.SubElement(s_postal, "ram:PostcodeCode").text = str(s_postcode)
+    s_line1 = data["seller"].get("street") or data["seller"].get("line1") or seller_addr.get("line1")
+    if s_line1:
+        ET.SubElement(s_postal, "ram:LineOne").text = str(s_line1)
+    s_city = data["seller"].get("city") or seller_addr.get("city")
+    if s_city:
+        ET.SubElement(s_postal, "ram:CityName").text = str(s_city)
+    ET.SubElement(s_postal, "ram:CountryID").text = str(seller_country)
+
     if data["seller"].get("vat_id"):
         seller_tax = ET.SubElement(seller, "ram:SpecifiedTaxRegistration")
         ET.SubElement(seller_tax, "ram:ID", attrib={"schemeID": "VA"}).text = data["seller"]["vat_id"]
 
     buyer = ET.SubElement(agr, "ram:BuyerTradeParty")
     ET.SubElement(buyer, "ram:Name").text = data["buyer"].get("name", "Buyer")
+
+    # PostalTradeAddress for Buyer (BR-10, BR-11)
+    b_postal = ET.SubElement(buyer, "ram:PostalTradeAddress")
+    b_postcode = data["buyer"].get("postal_code") or data["buyer"].get("postcode") or buyer_addr.get("postcode")
+    if b_postcode:
+        ET.SubElement(b_postal, "ram:PostcodeCode").text = str(b_postcode)
+    b_line1 = data["buyer"].get("street") or data["buyer"].get("line1") or buyer_addr.get("line1")
+    if b_line1:
+        ET.SubElement(b_postal, "ram:LineOne").text = str(b_line1)
+    b_city = data["buyer"].get("city") or buyer_addr.get("city")
+    if b_city:
+        ET.SubElement(b_postal, "ram:CityName").text = str(b_city)
+    ET.SubElement(b_postal, "ram:CountryID").text = str(buyer_country)
+
     if data["buyer"].get("vat_id"):
         buyer_tax = ET.SubElement(buyer, "ram:SpecifiedTaxRegistration")
         ET.SubElement(buyer_tax, "ram:ID", attrib={"schemeID": "VA"}).text = data["buyer"]["vat_id"]
@@ -285,7 +346,7 @@ def extract_facturx_xml(pdf_bytes: bytes) -> bytes:
 
 
 def verify_pdf(pdf_bytes: bytes) -> dict[str, str]:
-    """Verify that a PDF strictly satisfies veraPDF PDF/A-3b clauses and KoSIT EN 16931 rules."""
+    """Verify that a PDF strictly satisfies veraPDF PDF/A-3b clauses and CEN EN 16931 Schematron rules."""
     if not pdf_bytes.startswith(b"%PDF-"):
         raise ProofFailed("missing %PDF- header")
 
@@ -324,7 +385,7 @@ def verify_pdf(pdf_bytes: bytes) -> dict[str, str]:
     except Exception as err:
         raise ProofFailed(f"embedded XML fails EN 16931 XSD validation: {err}")
 
-    # 4. XML Business rules verification (KoSIT)
+    # 4. XML Business rules verification (CEN EN 16931 Schematron & KoSIT)
     try:
         root_xml = ET.fromstring(xml_bytes)
     except ET.ParseError as err:
@@ -335,20 +396,62 @@ def verify_pdf(pdf_bytes: bytes) -> dict[str, str]:
     if not (guideline_id.startswith("urn:cen.eu:en16931:2017")):
         raise ProofFailed(f"KoSIT [BR-01]: guideline URN must be EN 16931, found {guideline_id}")
 
+    # BR-08, BR-09: Seller postal address and country code
+    seller_country = root_xml.find(".//{*}SellerTradeParty/{*}PostalTradeAddress/{*}CountryID")
+    if seller_country is None or not (seller_country.text or "").strip():
+        raise ProofFailed("CEN [BR-09]: seller postal address (BG-5) must contain a country code (BT-40)")
+
+    # BR-10, BR-11: Buyer postal address and country code
+    buyer_country = root_xml.find(".//{*}BuyerTradeParty/{*}PostalTradeAddress/{*}CountryID")
+    if buyer_country is None or not (buyer_country.text or "").strip():
+        raise ProofFailed("CEN [BR-11]: buyer postal address (BG-8) must contain a country code (BT-55)")
+
+    # Line items check
     lines = root_xml.findall(".//{*}IncludedSupplyChainTradeLineItem")
     if not lines:
         raise ProofFailed("EN 16931 requires at least one line item (IncludedSupplyChainTradeLineItem)")
 
-    net_el = root_xml.find(".//{*}TaxBasisTotalAmount")
-    tax_el = root_xml.find(".//{*}TaxTotalAmount")
-    grand_el = root_xml.find(".//{*}GrandTotalAmount")
-    if net_el is not None and tax_el is not None and grand_el is not None:
-        net_val = quantize(net_el.text or "0")
-        tax_val = quantize(tax_el.text or "0")
+    # BR-CO-10: Sum of line net amounts == header LineTotalAmount
+    sum_lines = Decimal("0.00")
+    for line in lines:
+        l_amt_el = line.find(".//{*}SpecifiedTradeSettlementLineMonetarySummation/{*}LineTotalAmount")
+        if l_amt_el is not None and l_amt_el.text:
+            sum_lines += quantize(l_amt_el.text)
+
+    hdr_net_el = root_xml.find(".//{*}SpecifiedTradeSettlementHeaderMonetarySummation/{*}LineTotalAmount")
+    if hdr_net_el is None or not hdr_net_el.text or quantize(hdr_net_el.text) != sum_lines:
+        hdr_net_val = quantize(hdr_net_el.text) if (hdr_net_el is not None and hdr_net_el.text) else Decimal("0.00")
+        raise ProofFailed(
+            f"CEN [BR-CO-10]: sum of invoice line net amounts ({sum_lines:.2f}) "
+            f"!= header LineTotalAmount ({hdr_net_val:.2f})"
+        )
+
+    # BR-CO-14: Sum of VAT category amounts == header TaxTotalAmount
+    taxes = root_xml.findall(".//{*}ApplicableHeaderTradeSettlement/{*}ApplicableTradeTax")
+    sum_taxes = Decimal("0.00")
+    for tax in taxes:
+        t_amt_el = tax.find("{*}CalculatedAmount")
+        if t_amt_el is not None and t_amt_el.text:
+            sum_taxes += quantize(t_amt_el.text)
+
+    hdr_tax_el = root_xml.find(".//{*}SpecifiedTradeSettlementHeaderMonetarySummation/{*}TaxTotalAmount")
+    if hdr_tax_el is None or not hdr_tax_el.text or quantize(hdr_tax_el.text) != sum_taxes:
+        hdr_tax_val = quantize(hdr_tax_el.text) if (hdr_tax_el is not None and hdr_tax_el.text) else Decimal("0.00")
+        raise ProofFailed(
+            f"CEN [BR-CO-14]: sum of VAT category tax amounts ({sum_taxes:.2f}) "
+            f"!= header TaxTotalAmount ({hdr_tax_val:.2f})"
+        )
+
+    # BR-CO-15: GrandTotalAmount == TaxBasisTotalAmount + TaxTotalAmount
+    tax_basis_el = root_xml.find(".//{*}SpecifiedTradeSettlementHeaderMonetarySummation/{*}TaxBasisTotalAmount")
+    grand_el = root_xml.find(".//{*}SpecifiedTradeSettlementHeaderMonetarySummation/{*}GrandTotalAmount")
+    if tax_basis_el is not None and hdr_tax_el is not None and grand_el is not None:
+        basis_val = quantize(tax_basis_el.text or "0")
+        tax_val = quantize(hdr_tax_el.text or "0")
         grand_val = quantize(grand_el.text or "0")
-        if grand_val != quantize(net_val + tax_val):
+        if grand_val != quantize(basis_val + tax_val):
             raise ProofFailed(
-                f"KoSIT [BR-CO-15]: grand total ({grand_val:.2f}) != net ({net_val:.2f}) + tax ({tax_val:.2f})"
+                f"KoSIT [BR-CO-15]: grand total ({grand_val:.2f}) != net ({basis_val:.2f}) + tax ({tax_val:.2f})"
             )
 
     digest = hashlib.sha256(xml_bytes).hexdigest()
@@ -391,8 +494,22 @@ def selftest() -> int:
     inv_data = {
         "number": "INV-2026-001",
         "date": "2026-05-15",
-        "seller": {"name": "Acme Supplies GmbH", "vat_id": "DE123456789"},
-        "buyer": {"name": "Client Solutions AG", "vat_id": "DE987654321"},
+        "seller": {
+            "name": "Acme Supplies GmbH",
+            "vat_id": "DE123456789",
+            "country": "DE",
+            "city": "Munich",
+            "postal_code": "80331",
+            "street": "Maximilianstr. 10",
+        },
+        "buyer": {
+            "name": "Client Solutions AG",
+            "vat_id": "DE987654321",
+            "country": "DE",
+            "city": "Berlin",
+            "postal_code": "10115",
+            "street": "Friedrichstr. 50",
+        },
         "currency": "EUR",
         "net": 1000.00,
         "tax": 190.00,
@@ -404,6 +521,8 @@ def selftest() -> int:
     xml = build_facturx_xml(inv_data)
     check("XML contains CrossIndustryInvoice", b"CrossIndustryInvoice" in xml)
     check("XML contains IncludedSupplyChainTradeLineItem", b"IncludedSupplyChainTradeLineItem" in xml)
+    check("XML contains Seller PostalTradeAddress", b"<ram:PostalTradeAddress>" in xml)
+    check("XML contains CountryID", b"<ram:CountryID>DE</ram:CountryID>" in xml)
     check("XML contains EN 16931 guideline URN", EN16931_URN.encode() in xml)
     check("XML passes EN 16931 XSD check", facturx.xml_check_xsd(xml, flavor="factur-x", level="en16931") is True)
 
@@ -435,6 +554,22 @@ def selftest() -> int:
     except Refused:
         check("refuse missing line items", True)
 
+    # Refusal: CEN [BR-09] missing seller country code
+    try:
+        bad_seller = {**inv_data, "seller": {"name": "Acme GmbH"}}
+        build_facturx_xml(bad_seller)
+        check("refuse missing seller country code BR-09", False)
+    except Refused:
+        check("refuse missing seller country code BR-09", True)
+
+    # Refusal: CEN [BR-11] missing buyer country code
+    try:
+        bad_buyer = {**inv_data, "buyer": {"name": "Client AG"}}
+        build_facturx_xml(bad_buyer)
+        check("refuse missing buyer country code BR-11", False)
+    except Refused:
+        check("refuse missing buyer country code BR-11", True)
+
     # Refusal: non-PDF source
     try:
         attach_facturx_to_pdf(b"not a pdf", xml)
@@ -450,13 +585,47 @@ def selftest() -> int:
     except Refused:
         check("refuse KoSIT BR-01 guideline mismatch", True)
 
+    # Refusal: CEN [BR-CO-10] sum of line net amounts != net
+    try:
+        bad_line_sum_data = {**inv_data, "lines": [{"name": "Consulting", "amount": 500.00}], "net": 1000.00, "total": 1190.00}
+        build_facturx_xml(bad_line_sum_data)
+        check("refuse CEN BR-CO-10 line sum mismatch in pack", False)
+    except Refused:
+        check("refuse CEN BR-CO-10 line sum mismatch in pack", True)
+
+    # Refusal: CEN [BR-CO-14] sum of VAT category amounts != tax
+    try:
+        bad_tax_data = {**inv_data, "tax": 50.00, "total": 1050.00}
+        build_facturx_xml(bad_tax_data)
+        check("refuse CEN BR-CO-14 tax sum mismatch in pack", False)
+    except Refused:
+        check("refuse CEN BR-CO-14 tax sum mismatch in pack", True)
+
     # Refusal: KoSIT [BR-CO-15] rounding discrepancy
     try:
-        bad_math_data = {**inv_data, "net": 100.00, "tax": 19.00, "total": 119.05}
+        bad_math_data = {**inv_data, "net": 100.00, "tax": 19.00, "total": 119.05, "lines": [{"amount": 100.00, "tax_percent": 19.0}]}
         build_facturx_xml(bad_math_data)
         check("refuse KoSIT BR-CO-15 math discrepancy", False)
     except Refused:
         check("refuse KoSIT BR-CO-15 math discrepancy", True)
+
+    # Refusal: verify refuses XML with line sum mismatch [BR-CO-10]
+    bad_line_xml = xml.replace(b"<ram:LineTotalAmount>1000.00</ram:LineTotalAmount>", b"<ram:LineTotalAmount>500.00</ram:LineTotalAmount>", 1)
+    bad_line_hybrid = facturx.generate_from_binary(fixture_pdf, bad_line_xml, flavor="factur-x", level="en16931", check_xsd=False)
+    try:
+        verify_pdf(bad_line_hybrid)
+        check("verify refuses XML with line sum mismatch BR-CO-10", False)
+    except ProofFailed:
+        check("verify refuses XML with line sum mismatch BR-CO-10", True)
+
+    # Refusal: verify refuses XML with tax mismatch [BR-CO-14]
+    bad_tax_xml = xml.replace(b"<ram:CalculatedAmount>190.00</ram:CalculatedAmount>", b"<ram:CalculatedAmount>50.00</ram:CalculatedAmount>", 1)
+    bad_tax_hybrid = facturx.generate_from_binary(fixture_pdf, bad_tax_xml, flavor="factur-x", level="en16931", check_xsd=False)
+    try:
+        verify_pdf(bad_tax_hybrid)
+        check("verify refuses XML with tax mismatch BR-CO-14", False)
+    except ProofFailed:
+        check("verify refuses XML with tax mismatch BR-CO-14", True)
 
     # Refusal: plain non-hybrid PDF fails verification
     try:

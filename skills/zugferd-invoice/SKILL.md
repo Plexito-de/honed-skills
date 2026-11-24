@@ -40,7 +40,8 @@ without false greens.
   with `/AFRelationship /Alternative`.
 - **`extract`**: Extracts the embedded `factur-x.xml` from an incoming hybrid invoice PDF to disk.
 - **`verify`**: Inspects a hybrid invoice, verifying that the PDF structure and pages parse cleanly,
-  the embedded XML passes official EN 16931 XSD validation, and business rules (`[BR-01]`, `[BR-CO-15]`) hold.
+  the embedded XML passes official EN 16931 XSD validation, and business rules (`[BR-01]`, `[BR-09]`,
+  `[BR-11]`, `[BR-CO-10]`, `[BR-CO-14]`, `[BR-CO-15]`) hold.
 - **`selftest`**: Runs the offline selftest suite validating end-to-end invoice generation, attachment,
   extraction, round-trip equality, and exact clause refusals.
 
@@ -86,11 +87,19 @@ Expected JSON format:
   "currency": "EUR",
   "seller": {
     "name": "Acme Solutions GmbH",
-    "vat_id": "DE123456789"
+    "vat_id": "DE123456789",
+    "country": "DE",
+    "city": "Munich",
+    "postal_code": "80331",
+    "street": "Maximilianstr. 10"
   },
   "buyer": {
     "name": "Global Logistics S.A.",
-    "vat_id": "FR98765432101"
+    "vat_id": "FR98765432101",
+    "country": "FR",
+    "city": "Paris",
+    "postal_code": "75008",
+    "street": "Boulevard Haussmann 25"
   },
   "lines": [
     {
@@ -152,4 +161,8 @@ Invariants checked:
 - `facturx` extraction: extracts `factur-x.xml` from stream without failure.
 - `facturx.xml_check_xsd`: validates embedded XML against official EN 16931 XSD schemas.
 - `KoSIT [BR-01]`: Guideline URN is `urn:cen.eu:en16931:2017`.
-- `KoSIT [BR-CO-15]`: Line item amounts sum to net, and net plus tax equals grand total.
+- `CEN [BR-08] / [BR-09]`: Seller postal address (`BG-5`) contains a Seller country code (`BT-40`).
+- `CEN [BR-10] / [BR-11]`: Buyer postal address (`BG-8`) contains a Buyer country code (`BT-55`).
+- `CEN [BR-CO-10]`: Sum of invoice line net amounts (`BT-106`) equals Σ invoice line net amounts (`BT-131`).
+- `CEN [BR-CO-14]`: Invoice total VAT amount (`BT-110`) equals Σ VAT category tax amounts (`BT-117`).
+- `KoSIT [BR-CO-15]`: Grand total equals net plus tax (`BT-112 = BT-109 + BT-110`).
