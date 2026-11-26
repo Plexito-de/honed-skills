@@ -21,6 +21,11 @@ its `SKILL.md` frontmatter. The format follows [Keep a Changelog](https://keepac
 
 ### Changed
 
+- `human-review` 1.6.0: video review. Open an `.mp4`, `.m4v`, `.mov` or `.webm`, draw
+  on a paused frame, note a moment or a span, and get back each moment's frame with the marks drawn
+  in, a crop per mark, and the time in seconds and as a timecode. ffmpeg converts a file that not
+  every browser plays, once per render. The server now answers byte ranges and several requests at
+  once, so a video download cannot hold up Send.
 - `excalidraw` 1.2.0: lint rules for arrows that cross, overlap or run through another arrow's
   label, ranked by the evidence (Purchase 1997: crossings hurt reading most). C4 element types,
   technologies and per-edge source provenance in the spec, with matching lint notes.
