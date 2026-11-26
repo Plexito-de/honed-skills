@@ -84,6 +84,14 @@ rules:
       for writing, every write goes to ~/.claude/.review/<id>/, and `edits_saved` is hard-coded
       false in the batch for exactly that reason. The sentence stays, because an agent that
       believes the reviewer's edit was already saved will not apply it.
+  - id: "RA2"
+    path: ".skillspector-baseline.yaml"
+    reason: >-
+      The match is the entry above, which quotes where this tool writes. Every write does go under
+      ~/.claude/.review/<id>/, as SKILL.md says: the session, its frames and crops, and since
+      1.6.0 a video converted for the browser. Nothing else under ~/.claude is touched: no
+      settings, no skill, no hook. Rejected moving sessions elsewhere, because agents and gates
+      already read receipts from that folder.
 
 # NOT baselined, and it cannot be, so the absence is not read as an oversight:
 #

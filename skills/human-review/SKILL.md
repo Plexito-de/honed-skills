@@ -2,23 +2,26 @@
 name: human-review
 description: >-
   Put a draft in front of the person you are working for and get their markup back in one batch:
-  they retype text, comment on any selection, and circle or scribble on images and PDF pages with
-  a note per mark. Use before anything they will read, print or publish: post, spec, plan, report,
-  newsletter, landing page, deck, invitation, poster, chart, rendered design, screenshot.
+  they retype text, comment on any selection, circle or scribble on images, PDF pages and paused
+  video frames with a note per mark, and note a moment or a span of a video. Use before anything
+  they will read, watch, print or publish: post, spec, plan, report, newsletter, landing page,
+  deck, invitation, poster, chart, rendered design, screenshot, video, Short.
 license: Apache-2.0
 compatibility: >-
   Requires Python 3.9+ and nothing from pip, npm or Node. PDF pages are drawn in the browser by a
   pinned, checksummed copy of PDF.js (Apache-2.0) that ships in assets/vendor/pdfjs and is served
   from 127.0.0.1, so no renderer has to be installed and nothing is fetched at run time. A
-  PowerPoint deck or Word document (.docx) needs LibreOffice (`soffice`) to become a PDF first.
-  Works offline. Agent-agnostic.
+  PowerPoint deck or Word document (.docx) needs LibreOffice (`soffice`) to become a PDF first. A
+  video plays as it is when every browser can play it; ffmpeg and ffprobe, when installed, read
+  its frame rate and convert the others once. Works offline. Agent-agnostic.
 metadata:
-  version: "1.5.0"
+  version: "1.6.0"
   changeSummary: >-
-    Staging source snapshots and Send-time disk change warnings now protect all reviewable formats
-    (PDF, Markdown, HTML, text, images, PowerPoint, Word) and certify the exact viewed bytes in
-    receipt.json. Password-protected PowerPoint decks (.pptx) are detected early and skipped alongside
-    Word documents.
+    Video review. Open an .mp4, .m4v, .mov or .webm, draw on a paused frame, note a moment or a
+    span, and get back every moment's frame with the marks drawn in, a crop per mark, and the time
+    in seconds and as a timecode. A file a browser cannot play is converted to H.264 once, with
+    ffmpeg. The server answers byte ranges and several requests at once, and hashes a source in
+    pieces instead of reading it into memory.
   isBreaking: "false"
 ---
 
@@ -38,15 +41,24 @@ reviewer's attention. They also cost a round every time an item crosses the boun
 One card, one draft, four items back. Everything in the picture is invented, and
 [`scripts/make_example_inputs.py`](scripts/make_example_inputs.py) rebuilds the two files behind it.
 
+A video works the same way. Pause it, circle what is wrong on the frame, or note a moment or a span
+of time. The batch brings back each moment's frame with the marks drawn in.
+
+![The review page with a vertical Short paused at 0:03.02: a box numbered 1 around a caption that sits too low, a timeline with three numbered markers and a span bar at the end, and three notes in the sidebar, each starting with its time](../../docs/assets/review-video-marked-up.png)
+
+A box on a frame, a note on the sound, a span over the end card. `make_example_inputs.py --video`
+rebuilds the Short and its script.
+
 ## The loop
 
 ```sh
 skills/human-review/bin/review open draft.md card.png form.pdf   # opens the page, returns at once
+skills/human-review/bin/review open short.mp4 voice-over.md      # a video with its script
 skills/human-review/bin/review poll --session <id>               # blocks until they hit Send
 skills/human-review/bin/review poll --ack                        # clears the batch you handled
 skills/human-review/bin/review status                            # is a batch waiting
 skills/human-review/bin/review close                             # stop a review nobody sends
-skills/human-review/bin/review selftest [--browser]              # 51 offline cases, 119 more in Chrome (wide and phone)
+skills/human-review/bin/review selftest [--browser]              # 163 offline cases, 191 more in Chrome (wide and phone)
 ```
 
 1. Write or render the draft.
@@ -68,13 +80,40 @@ skills/human-review/bin/review selftest [--browser]              # 51 offline ca
 | A Markdown, HTML or text draft | select any text, across paragraphs too, click Comment (or Ctrl+Alt+M), type the note | the quote with a prefix and suffix anchor, and the block it sits in. A selection over several paragraphs also lists them in `blocks` |
 | The same draft                 | type straight into it                             | a before and after per block                                               |
 | The same draft                 | circle, box, freehand or arrow, one note per mark | the `tool`, the marked words as `quote`, their block and a `box`. No crop, and an empty anchor |
+| A video                        | pause it, then circle, box, freehand or arrow on the frame | the moment `t` and its `timecode`, the frame with the marks of that moment drawn in, and one padded crop per mark |
+| The same video                 | Note at (or `n`) for a moment, `i` and `o` for a span | the moment, or a span from `t` to `t_end` with the frame at each end |
 
-Every item lands in one numbered list. Their "2" is your "2", on a picture and in a paragraph alike.
+Every item lands in one numbered list. Their "2" is your "2", on a picture, in a paragraph and on a
+video alike.
 
 A PDF is drawn page by page by PDF.js, at the pixel ratio of the screen, so it is as sharp as a PDF
 viewer and its text behaves like text: selectable, copyable, and findable with the browser's own
 Ctrl+F across every page of the session. Every crop of a PDF page is re-rendered from the file at up
 to eight times page size, so six-point type in a footnote is legible in the crop.
+
+## Reviewing a video
+
+`open` takes `.mp4`, `.m4v`, `.mov` and `.webm`. A file that every browser plays (H.264 8-bit in
+MP4, VP8 or VP9 in WebM) is staged as it is. A QuickTime file with those streams is rewritten as MP4
+without re-encoding. Anything else (HEVC, AV1, ProRes, 10-bit, PCM sound) is converted once to
+H.264 and AAC with ffmpeg, and `open` says so. The conversion is kept in the session under the
+file's hash, so the next round on the same render starts at once.
+
+The picture fits the height of the window, so a 9:16 Short is seen whole. Under it are a timeline
+with one numbered marker per note, Play, one frame back and on, the speed (0.25x, 0.5x, 1x), Mute,
+Note at, In and Out.
+
+- **Drawing pauses the video.** The mark belongs to the frame on screen. It shows only while the
+  playhead sits on that frame, and a click on its marker or its note goes back there.
+- **Every pause and seek lands on the middle of a frame**, so the frame on screen, the time a mark
+  records and the frame Send exports are one frame.
+- **A note needs no drawing.** Note at (or `n`) is for the sound, the pacing or a cut.
+- **A span is two key presses.** `i` where it starts, `o` where it ends. Escape drops a started span.
+- **The player's keys work only while it has focus**, so `j`, `k` and `o` keep their meaning
+  everywhere else: Space plays and pauses, `,` and `.` or the arrow keys step one frame,
+  Shift+arrow one second, Home and End go to the first and last frame. Escape in a note on a video
+  gives the keys back to the player.
+- A tap on the picture that draws nothing plays or pauses it.
 
 ## Finding the way around a long session
 
@@ -182,6 +221,55 @@ so the list is also a map of where the feedback is.
 }
 ```
 
+A video is one page of its own kind. This one is from the session in the second picture:
+
+```json
+{
+  "kind": "video",
+  "name": "morning-lab-ep1.mp4",
+  "source": "/abs/morning-lab-ep1.mp4",
+  "duration": 6.0,
+  "fps": 30.0,
+  "width": 540,
+  "height": 960,
+  "marks": [
+    {
+      "number": 1,
+      "tool": "rect",
+      "note": "The caption sits under the app's own buttons. Move it up a third.",
+      "t": 3.017,
+      "timecode": "0:03.02",
+      "frame_number": 90,
+      "box": { "x": 0.17, "y": 0.925, "w": 0.66, "h": 0.07 },
+      "frame": "/…/frames/d1_morning_lab_ep1_at_00003017ms.jpg",
+      "crop": "/…/crops/d1_morning_lab_ep1_mark_01.png"
+    },
+    {
+      "number": 2,
+      "tool": "note",
+      "note": "The music starts too loud for the first line.",
+      "t": 0.517,
+      "timecode": "0:00.52",
+      "frame_number": 15,
+      "frame": "/…/frames/d1_morning_lab_ep1_at_00000517ms.jpg"
+    },
+    {
+      "number": 3,
+      "tool": "span",
+      "note": "The end card can go after one second.",
+      "t": 4.017,
+      "timecode": "0:04.02",
+      "frame_number": 120,
+      "t_end": 5.983,
+      "timecode_end": "0:05.98",
+      "frame_number_end": 179,
+      "frame": "/…/frames/d1_morning_lab_ep1_at_00004017ms.jpg",
+      "frame_end": "/…/frames/d1_morning_lab_ep1_at_00005983ms.jpg"
+    }
+  ]
+}
+```
+
 ### Rules for reading it
 
 - **Open every `crop`.** This is the point of the media path. A box at `0.30, 0.05` tells you
@@ -205,6 +293,21 @@ so the list is also a map of where the feedback is.
   the word at its head. An empty `quote` means the shape sat on no words; `block` still names the
   block nearest to it. Over several paragraphs it has `blocks` and `parts` like a selection. A mark
   is read when it is drawn, so later edits do not change its quote.
+- **On a video, open every `frame`.** It is the frame they saw, with the marks of that moment drawn
+  in. Notes on one frame share one file. `t` is in seconds, and `timecode` is the same moment as
+  `M:SS.cc`.
+- **`t` is the middle of its frame, so do not hand it to `ffmpeg -ss`.** `-ss` takes the first frame
+  at or after a time, which is the next one. For the frame without marks, give it the start of the
+  frame: `ffmpeg -ss <frame_number / fps> -i <file> -frames:v 1 clean.png`.
+- **`t` is on the copy the browser played.** That is `source` itself, unless the page carries
+  `played` and `converted`: then use `played` for frames and timings. A conversion keeps the timing,
+  so `t` also finds the moment in the source.
+- **`frame_number` counts from 0 at the average frame rate.** On a phone or screen recording the rate
+  varies, so treat the number as close and `t` as exact.
+- **A `note` has no box and no crop. A `span` has `t_end`, `timecode_end` and `frame_end`** too.
+  `frame` is null when the browser could not show that frame. `past_end: true` means the note was
+  made on a longer version of the file, so that moment is not in this one and it has no frame: ask
+  about it.
 - **`source` is the original file.** Edit that file. The copy in the session directory is a working
   copy, and a rewrite of it changes nothing.
 - **`edits_saved` is always false.** This tool never writes to their files. Apply `after`
@@ -259,6 +362,7 @@ the most expensive input in the loop. Do not spend it on a defect a tool can fin
   `default-src 'none'` with a fresh nonce for its two scripts, so a reviewed HTML draft can no longer
   run an `onclick=` handler or a `javascript:` link, and `img-src 'self'` means a **remote image
   inside a reviewed draft does not load**. Inline it, or review a screenshot, if you need to see it.
+  `media-src 'self'` lets the page play the session's own video and nothing else.
 - A PowerPoint deck (.pptx) or Word document (.docx) needs LibreOffice (`soffice`) to become a PDF first.
   Password-protected decks and documents are detected and skipped cleanly.
 - Word (.docx) review limits: Word comments are not rendered, tracked changes show as the document last displayed them, and a Word file is reviewed by marking and commenting, not retyping.
@@ -267,7 +371,15 @@ the most expensive input in the loop. Do not spend it on a defect a tool can fin
   dependency, and a draft review does not need it.
 - The tool reviews **files**. A page from a development server is out of scope. Screenshot it, or
   review the template behind it.
-- The tool does not support video. Export a frame.
+- **Video needs ffmpeg only for a file that not every browser plays**, and ffprobe for the frame rate.
+  Without them a file is staged as it is, `fps` is null, and a frame step is 1/30 s. If the browser
+  then cannot play the file, the page says so, and a note on it is still sent, without a frame.
+- **HDR footage is converted without tone mapping**, so it looks pale. Review an SDR render instead.
+- **A conversion runs at `open`.** A long 4K master takes minutes once, and nothing on the next
+  round of the same file.
+- **The server answers byte ranges for video**, which Safari needs to play it at all and every
+  browser needs to seek. It serves several requests at once, so a download the browser holds open
+  cannot hold up a draft save or Send.
 - **Send closes the tab.** A browser lets a page close its own tab only while the tab has one
   history entry. A review opened in a tab that already showed a page cannot close itself. On macOS
   the server then closes that tab in Chrome or Edge. It does so only when the app the agent runs in

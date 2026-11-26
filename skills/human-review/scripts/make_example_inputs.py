@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
-"""Build the two placeholder files behind the screenshot in the README, then open them for review.
+"""Build the placeholder files behind the screenshots in the README, then open them for review.
 
-The screenshot shows a card and a draft on one page with three marks on them. This script produces
-the card and the draft. It does not draw the marks: a person draws them, which is the whole point of
-the skill, so the picture in the README is a real session rather than a mock.
+The first screenshot shows a card and a draft on one page with three marks on them. The second
+shows a vertical Short with its voice-over script. This script produces those files. It does not
+draw the marks: a person draws them, which is the whole point of the skill, so each picture in the
+README is a real session rather than a mock.
 
 Everything here is invented. No real product, person, venue or date.
 
     python3 scripts/make_example_inputs.py            # write the files, print the command
     python3 scripts/make_example_inputs.py --open     # write them and open the review page
+    python3 scripts/make_example_inputs.py --video    # the Short and its script instead
 
-Standard library only. Rendering the card needs a Chrome or Chromium binary, because the card is an
-HTML file screenshotted at a fixed size. Everything else is text.
+Standard library only. Rendering the card and the frames of the Short needs a Chrome or Chromium
+binary, because each is an HTML file screenshotted at a fixed size. The Short also needs ffmpeg,
+which joins the frames into a video. Everything else is text.
 """
 from __future__ import annotations
 
@@ -78,6 +81,131 @@ CARD_HTML = """<!doctype html>
 </div>
 """
 
+# The Short: three scenes of two seconds each, 540x960. Scene two puts its caption too low on
+# purpose, so there is something to circle.
+SHORT_SCENE = """<!doctype html>
+<meta charset="utf-8">
+<style>
+  html, body {{ margin: 0; }}
+  body {{ width: 540px; height: 960px; font-family: "Helvetica Neue", Arial, sans-serif;
+         background: {bg}; color: #f8fafc; position: relative; overflow: hidden; }}
+  .big {{ position: absolute; left: 44px; right: 44px; top: {top}px; font-size: {size}px;
+          line-height: 1.02; font-weight: 800; letter-spacing: -0.01em; }}
+  .cap {{ position: absolute; left: 50%; transform: translateX(-50%); bottom: {cap_bottom}px;
+          background: rgba(10, 14, 22, .78); padding: 10px 18px; border-radius: 10px;
+          font-size: 25px; font-weight: 600; white-space: nowrap; }}
+  .tag {{ position: absolute; left: 44px; top: 48px; font-size: 17px; letter-spacing: .3em;
+          text-transform: uppercase; opacity: .75; }}
+</style>
+<div class="tag">Morning lab</div>
+<div class="big">{text}</div>
+<div class="cap">{caption}</div>
+"""
+SHORT_SCENES = (
+    {
+        "bg": "linear-gradient(160deg, #3b1d60 0%, #a3324d 100%)",
+        "top": 300,
+        "size": 64,
+        "text": "Three things your mornings get wrong",
+        "caption": "Stay to the end",
+        "cap_bottom": 150,
+    },
+    {
+        "bg": "linear-gradient(160deg, #0f3d3e 0%, #1f7a6d 100%)",
+        "top": 250,
+        "size": 58,
+        "text": "1. The phone comes first",
+        "caption": "Leave it in another room",
+        "cap_bottom": 18,
+    },
+    {
+        "bg": "linear-gradient(160deg, #1d2b53 0%, #3a6ea5 100%)",
+        "top": 330,
+        "size": 60,
+        "text": "Follow for part two",
+        "caption": "New every Friday",
+        "cap_bottom": 150,
+    },
+)
+SHORT_SCRIPT = """# Morning lab, episode 1: voice-over
+
+Three things your mornings get wrong. Stay to the end.
+
+The first one: the phone comes first. Leave it in another room tonight.
+
+Follow for part two. A new one every Friday.
+"""
+
+
+def make_short(out: Path) -> tuple[Path, Path]:
+    """The Short and its voice-over script, as invented as the card."""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        sys.exit("ffmpeg is needed to join the frames of the Short into a video")
+    frames = []
+    for n, scene in enumerate(SHORT_SCENES, 1):
+        html = out / f"scene{n}.html"
+        png = out / f"scene{n}.png"
+        html.write_text(SHORT_SCENE.format(**scene))
+        subprocess.run(
+            [
+                chrome(),
+                "--headless",
+                "--disable-gpu",
+                "--hide-scrollbars",
+                "--window-size=540,960",
+                f"--screenshot={png}",
+                str(html),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        html.unlink()
+        frames.append(png)
+    short = out / "morning-lab-ep1.mp4"
+    inputs = []
+    for png in frames:
+        inputs += ["-loop", "1", "-t", "2", "-framerate", "30", "-i", str(png)]
+    joined = "".join(f"[{i}:v]" for i in range(len(frames)))
+    subprocess.run(
+        [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            *inputs,
+            "-f",
+            "lavfi",
+            "-t",
+            "6",
+            "-i",
+            "sine=frequency=330:sample_rate=48000",
+            "-filter_complex",
+            f"{joined}concat=n={len(frames)}:v=1:a=0,format=yuv420p[v]",
+            "-map",
+            "[v]",
+            "-map",
+            f"{len(frames)}:a",
+            "-c:v",
+            "libx264",
+            "-c:a",
+            "aac",
+            "-shortest",
+            "-movflags",
+            "+faststart",
+            str(short),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    for png in frames:
+        png.unlink()
+    script = out / "voice-over.md"
+    script.write_text(SHORT_SCRIPT)
+    return short, script
+
+
 def chrome() -> str:
     for c in CHROME_CANDIDATES:
         if Path(c).exists():
@@ -92,10 +220,30 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=None, help="directory for the files (default: a temp directory)")
     ap.add_argument("--open", action="store_true", help="also open the review page on them")
+    ap.add_argument(
+        "--video",
+        action="store_true",
+        help="make the Short and its script instead of the card and the draft",
+    )
     args = ap.parse_args()
 
     out = Path(args.out) if args.out else Path(tempfile.mkdtemp(prefix="human-review-example-"))
     out.mkdir(parents=True, exist_ok=True)
+    review = Path(__file__).resolve().parent.parent / "bin" / "review"
+    if args.video:
+        short, script = make_short(out)
+        print(f"short:  {short}\nscript: {script}")
+        if args.open:
+            subprocess.run([str(review), "open", str(short), str(script)], check=True)
+        else:
+            print(f"\nopen it with:\n  {review} open {short} {script}")
+        print(
+            "\nThen mark it yourself. The README picture shows three notes:\n"
+            "  1  a box on the caption at 0:03, note: the caption sits in the app's buttons\n"
+            "  2  a note at 0:00.5 with no drawing, note: the music starts too loud\n"
+            "  3  a span from 0:04 to 0:06, note: the end card can go after one second"
+        )
+        return 0
     draft = out / "launch-note.md"
     html = out / "card.html"
     card = out / "card.png"
@@ -107,7 +255,6 @@ def main() -> int:
                    check=True, capture_output=True)
     html.unlink()
 
-    review = Path(__file__).resolve().parent.parent / "bin" / "review"
     print(f"draft: {draft}\ncard:  {card}")
     if args.open:
         subprocess.run([str(review), "open", str(card), str(draft)], check=True)
