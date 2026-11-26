@@ -48,6 +48,7 @@ import secrets
 import shlex
 import shutil
 import signal
+import socket
 import socketserver
 import subprocess
 import sys
@@ -71,9 +72,14 @@ VENDOR = ASSETS / "vendor" / "pdfjs"
 VENDOR_FILES = ("pdf.min.mjs", "pdf.worker.min.mjs")
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 TEXT_SUFFIXES = {".md", ".markdown", ".html", ".htm", ".txt"}
+VIDEO_SUFFIXES = {".mp4", ".m4v", ".mov", ".webm"}
 DRAFT_TOOLS = {"ellipse", "rect", "free", "arrow"}  # the shapes the page can draw on a draft
+# On a video the same four shapes, plus a note at one moment and a note over a span of time.
+VIDEO_TOOLS = DRAFT_TOOLS | {"note", "span"}
 CONTENT_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
                  ".gif": "image/gif", ".webp": "image/webp", ".pdf": "application/pdf",
+                 ".mp4": "video/mp4", ".m4v": "video/mp4", ".mov": "video/quicktime",
+                 ".webm": "video/webm",
                  ".mjs": "text/javascript; charset=utf-8", ".js": "text/javascript; charset=utf-8",
                  ".json": "application/json"}
 
@@ -327,6 +333,252 @@ def notes_html(notes: list[str]) -> str:
     return "".join(blocks)
 
 
+def file_sha256(path: Path) -> str:
+    """The SHA-256 of a file, read in pieces. A video master can be gigabytes, and `read_bytes()`
+    held all of it in memory, once at staging and again at Send."""
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+# --------------------------------------------------------------------------- video
+# What every current browser plays, by container. Anything outside it is converted ONCE, at
+# staging, into H.264 and AAC in MP4, the one combination Chrome, Edge, Safari and Firefox all
+# play. Chrome plays HEVC only with a hardware decoder (never on a headless Linux box), Safari
+# plays AV1 only on recent Apple silicon, and no browser plays ProRes, so none of them is safe.
+# 8-bit 4:2:0 only: a 10-bit H.264 file is valid and still refused by most decoders.
+PLAYABLE = {
+    "mp4": ({"h264"}, {"aac", "mp3", None}),
+    "webm": ({"vp8", "vp9"}, {"opus", "vorbis", None}),
+}
+PLAYABLE_PIX = {"yuv420p", "yuvj420p"}
+
+
+def _rate(text) -> float | None:
+    """ffprobe's "30000/1001" as 29.97. "0/0" and garbage are None, never a division error."""
+    try:
+        num, _, den = str(text).partition("/")
+        value = float(num) / float(den or 1)
+    except (ValueError, ZeroDivisionError):
+        return None
+    # Above 240 it is a timebase, not a frame rate: a MediaRecorder WebM reports 1000/1, and a
+    # frame step of one millisecond would not move the picture at all.
+    return round(value, 3) if 0 < value <= 240 else None
+
+
+def _rotation(stream: dict) -> int:
+    """The display rotation of a stream in degrees, from the side data or the older tag."""
+    for side in stream.get("side_data_list") or []:
+        if "rotation" in side:
+            try:
+                return int(round(float(side["rotation"]))) % 360
+            except (TypeError, ValueError):
+                pass
+    try:
+        return int(round(float((stream.get("tags") or {}).get("rotate", 0)))) % 360
+    except (TypeError, ValueError):
+        return 0
+
+
+def probe_video(path: Path) -> dict | None:
+    """What ffprobe says about a video, or None when ffprobe is missing or cannot read the file.
+
+    The size is the DISPLAY size: a phone records a portrait Short as landscape pixels plus a
+    90-degree rotation, and the browser shows it rotated. The frame rate is the average one;
+    `r_frame_rate` is only a guess at a rate that represents every timestamp, and it reads 90000
+    on some phone files.
+    """
+    exe = shutil.which("ffprobe")
+    if not exe:
+        return None
+    try:
+        out = subprocess.run([exe, "-v", "error", "-print_format", "json", "-show_format",
+                              "-show_streams", str(path)], capture_output=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as e:
+        return None if isinstance(e, OSError) else {"vcodec": None, "error": "ffprobe timed out"}
+    try:
+        data = json.loads(out.stdout or b"{}") if out.returncode == 0 else None
+    except ValueError:
+        data = None
+    if not isinstance(data, dict):
+        # ffprobe ran and could not read the file: damaged, or not a video at all. A browser
+        # will not play it either, so it is skipped with ffprobe's own words.
+        why = out.stderr.decode(errors="replace").strip().splitlines()[-1:] or ["unreadable"]
+        return {"vcodec": None, "error": why[0][:160]}
+    streams = [s for s in data.get("streams") or [] if isinstance(s, dict)]
+    video = next((s for s in streams if s.get("codec_type") == "video"
+                  and not (s.get("disposition") or {}).get("attached_pic")), None)
+    audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    fmt = data.get("format") or {}
+    try:
+        duration = float(fmt.get("duration") or (video or {}).get("duration") or 0) or None
+    except (TypeError, ValueError):
+        duration = None
+    if not video:
+        return {"vcodec": None, "acodec": audio and audio.get("codec_name"), "duration": duration}
+    width, height = int(video.get("width") or 0), int(video.get("height") or 0)
+    sar = _rate(str(video.get("sample_aspect_ratio") or "1:1").replace(":", "/"))
+    if sar and sar != 1:
+        width = int(round(width * sar))          # anamorphic pixels, shown wider than stored
+    if _rotation(video) % 180 == 90:
+        width, height = height, width
+    return {"vcodec": video.get("codec_name"), "pix_fmt": video.get("pix_fmt"),
+            "acodec": audio.get("codec_name") if audio else None,
+            "width": width or None, "height": height or None,
+            "fps": _rate(video.get("avg_frame_rate")) or _rate(video.get("r_frame_rate")),
+            "duration": duration}
+
+
+def video_plan(probe: dict | None, suffix: str) -> dict:
+    """Copy, remux or convert, and why. A pure function, so every codec case is a unit test.
+
+    `action` is "copy" (the file as it is), "remux" (same streams, MP4 container) or "convert"
+    (ffmpeg writes an MP4, re-encoding only the stream that needs it). Without a probe nothing
+    is known, so the file is copied and the page reports it if the browser refuses it.
+    """
+    if probe is None:
+        return {"action": "copy", "why": "ffprobe is not installed"}
+    vcodec, acodec, pix = probe.get("vcodec"), probe.get("acodec"), probe.get("pix_fmt")
+    family = "webm" if suffix == ".webm" else "mp4"
+    vids, auds = PLAYABLE[family]
+    video_ok = vcodec in vids and pix in PLAYABLE_PIX
+    audio_ok = acodec in auds
+    if video_ok and audio_ok:
+        if suffix == ".mov":
+            return {"action": "remux", "ext": ".mp4",
+                    "why": "a QuickTime file, as MP4 with the same streams"}
+        if family == "webm" and not probe.get("duration"):
+            # A MediaRecorder WebM has no duration and no cues, so the browser reports Infinity
+            # and cannot seek. Copying the streams into a new WebM writes both.
+            return {"action": "remux", "ext": ".webm",
+                    "why": "a WebM without a duration, rewritten so it can be seeked"}
+        return {"action": "copy", "why": "plays as it is"}
+    # An MP4 needs H.264; a VP9 WebM with odd audio is re-encoded whole rather than mixed.
+    keep_video = vcodec == "h264" and pix in PLAYABLE_PIX
+    keep_audio = acodec in PLAYABLE["mp4"][1]
+    why = []
+    if not keep_video:
+        why.append(f"{vcodec or 'unknown'} video" + (f" ({pix})" if pix else ""))
+    if not keep_audio:
+        why.append(f"{acodec} audio")
+    return {"action": "convert", "ext": ".mp4", "video": "copy" if keep_video else "encode",
+            "audio": "none" if acodec is None else ("copy" if keep_audio else "encode"),
+            "why": " and ".join(why) + " does not play in every browser"}
+
+
+def ffmpeg_command(exe: str, plan: dict, src: Path, out: Path) -> list[str]:
+    """The ffmpeg line for a remux or a conversion.
+
+    Only the first picture and the first sound go in: a QuickTime timecode or data track cannot
+    be copied into MP4 and fails the whole run. Even dimensions, because 4:2:0 H.264 cannot have
+    an odd width, and `-pix_fmt yuv420p`, because libx264 keeps 10-bit input at 10 bits, which a
+    browser refuses. `+faststart` puts the index at the front of the file.
+    """
+    remux = plan["action"] == "remux"
+    # `V`, not `v`: a capital V skips cover art, which a QuickTime or M4V file can carry as its
+    # first video stream, and which would otherwise become the whole "video".
+    cmd = [exe, "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", str(src),
+           "-map", "0:V:0", "-map", "0:a:0?", "-sn", "-dn"]
+    if remux or plan.get("video") == "copy":
+        cmd += ["-c:v", "copy"]
+    else:
+        cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
+                "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2"]
+    if remux or plan.get("audio") in ("copy", "none"):
+        cmd += ["-c:a", "copy"]
+    else:
+        cmd += ["-c:a", "aac", "-b:a", "192k"]
+    if out.suffix == ".mp4":
+        cmd += ["-movflags", "+faststart"]
+    return cmd + [str(out)]
+
+
+# Part of the cache key. Raise it when ffmpeg_command changes, or a session keeps playing a copy
+# made by the old arguments.
+CONVERT_RECIPE = "1"
+
+
+def _link_or_copy(src: Path, dest: Path) -> None:
+    """A conversion from the session's own cache, put into `assets/`: a hard link where the file
+    system allows it, else a copy. Only for the cache: ffmpeg's `-y` rewrites its output in place,
+    so a hard link to a SOURCE would change the file under a live review on the next render."""
+    dest.unlink(missing_ok=True)
+    try:
+        os.link(src, dest)
+    except OSError:
+        shutil.copy2(src, dest)
+
+
+def _copy(src: Path, dest: Path) -> None:
+    if src.resolve() != dest.resolve():
+        shutil.copy2(src, dest)
+
+
+def stage_video(src: Path, sess: Path, adir: Path, ident: str, asset: str,
+                source_hash: str, used: set) -> dict | None:
+    """One video item. A conversion is cached in the session under the source's hash, so the next
+    round on the same bytes plays at once, and a re-rendered file is converted afresh. `clear_assets`
+    empties `assets/` on every open, so the cache lives beside it, in `converted/`."""
+    suffix = src.suffix.lower()
+    probe = probe_video(src)
+    if probe is not None and not probe.get("vcodec"):
+        why = f"ffprobe cannot read it ({probe['error']})" if probe.get("error") \
+            else "it has no video stream"
+        print(f"skipping {src.name}: {why}", file=sys.stderr)
+        return None
+    plan = video_plan(probe, suffix)
+    converted, dest = None, adir / f"{asset}{suffix}"
+    if plan["action"] == "copy":
+        _copy(src, dest)
+        if probe is None:
+            print(f"note: {src.name} is staged as it is, because ffprobe is not installed. "
+                  "If the browser cannot play it, install ffmpeg and open it again.",
+                  file=sys.stderr)
+    else:
+        cache = sess / "converted"
+        cache.mkdir(exist_ok=True)
+        key = f"{source_hash[:24]}_r{CONVERT_RECIPE}"
+        done = cache / f"{key}{plan['ext']}"
+        used.add(done.name)
+        exe = shutil.which("ffmpeg")
+        if not done.exists() and exe:
+            print(f"converting {src.name} for the browser: {plan['why']}. "
+                  "Once per version of the file.", file=sys.stderr)
+            part = cache / f"{key}.part{plan['ext']}"
+            try:
+                run = subprocess.run(ffmpeg_command(exe, plan, src, part),
+                                     capture_output=True, timeout=3600)
+                if run.returncode == 0 and part.exists() and part.stat().st_size:
+                    part.replace(done)
+                else:
+                    tail = run.stderr.decode(errors="replace").strip().splitlines()[-1:] or [""]
+                    print(f"warning: ffmpeg could not convert {src.name} ({tail[0][:160]})",
+                          file=sys.stderr)
+            except (OSError, subprocess.SubprocessError) as e:
+                print(f"warning: ffmpeg could not convert {src.name} ({e})", file=sys.stderr)
+            part.unlink(missing_ok=True)
+        if done.exists():
+            dest = adir / f"{asset}{plan['ext']}"
+            _link_or_copy(done, dest)
+            converted = plan["action"] if plan["action"] == "remux" else "h264"
+            probe = probe_video(dest) or probe
+        else:
+            if not exe:
+                print(f"warning: {src.name} needs ffmpeg to play in a browser ({plan['why']}); "
+                      "it is staged as it is", file=sys.stderr)
+            _copy(src, dest)
+    probe = probe or {}
+    # The hash in the address: on a fixed port two rounds share every asset name, and a browser
+    # media cache that joins byte ranges by address could mix the old render with the new one.
+    return {"kind": "video", "id": ident, "asset": asset, "name": src.name,
+            "url": f"/asset/{dest.name}?v={source_hash[:12]}", "source": str(src.resolve()),
+            "source_sha256": source_hash, "duration": probe.get("duration"),
+            "fps": probe.get("fps"), "width": probe.get("width"), "height": probe.get("height"),
+            "converted": converted, "played": str(dest)}
+
+
 def stage_inputs(paths: list[Path], sess: Path) -> list[dict]:
     """One item per DOCUMENT, never per page.
 
@@ -339,6 +591,7 @@ def stage_inputs(paths: list[Path], sess: Path) -> list[dict]:
     adir.mkdir(parents=True, exist_ok=True)
     clear_assets(adir, {p.resolve() for p in paths if p.exists()})
     items: list[dict] = []
+    used_conversions: set = set()
 
     def base(stem: str) -> tuple[str, str]:
         ident = f"d{len(items) + 1}"
@@ -358,7 +611,7 @@ def stage_inputs(paths: list[Path], sess: Path) -> list[dict]:
             pdf = office_to_pdf(src, dest)
             if pdf is None:
                 continue
-            source_hash = hashlib.sha256(src.read_bytes()).hexdigest()
+            source_hash = file_sha256(src)
             if suffix == ".pptx":
                 items.append({"kind": "media", "format": "pdf", "id": ident, "asset": asset,
                               "name": src.name, "url": f"/asset/{dest.name}",
@@ -375,7 +628,7 @@ def stage_inputs(paths: list[Path], sess: Path) -> list[dict]:
                               "source": str(src.resolve()), "page_label": "page",
                               "source_sha256": source_hash})
             continue
-        source_hash = hashlib.sha256(src.read_bytes()).hexdigest()
+        source_hash = file_sha256(src)
         if suffix == ".pdf":
             ident, asset = base(src.stem)
             dest = adir / f"{asset}.pdf"
@@ -396,6 +649,12 @@ def stage_inputs(paths: list[Path], sess: Path) -> list[dict]:
                           "source": str(src.resolve()),
                           "source_sha256": source_hash})
             continue
+        if suffix in VIDEO_SUFFIXES:
+            ident, asset = base(src.stem)
+            item = stage_video(src, sess, adir, ident, asset, source_hash, used_conversions)
+            if item:
+                items.append(item)
+            continue
         if suffix in TEXT_SUFFIXES:
             raw = src.read_text(errors="replace")
             if suffix in (".html", ".htm"):
@@ -412,8 +671,13 @@ def stage_inputs(paths: list[Path], sess: Path) -> list[dict]:
                           "source": str(src.resolve()),
                           "source_sha256": source_hash})
             continue
-        print(f"skipping {src.name}: reviewable types are images, PDF, PowerPoint, Word, Markdown, HTML, txt",
-              file=sys.stderr)
+        print(f"skipping {src.name}: reviewable types are images, video, PDF, PowerPoint, Word, "
+              "Markdown, HTML, txt", file=sys.stderr)
+    # A conversion nobody in this round uses is the previous version of a file. Gone, or the
+    # session folder grows by one video per render.
+    for old in (sess / "converted").iterdir() if (sess / "converted").is_dir() else ():
+        if old.is_file() and old.name not in used_conversions:
+            old.unlink(missing_ok=True)
     if not items:
         sys.exit("nothing to review among the given files")
     (sess / "items.json").write_text(json.dumps(items, indent=2))
@@ -421,6 +685,117 @@ def stage_inputs(paths: list[Path], sess: Path) -> list[dict]:
 
 
 # --------------------------------------------------------------------------- batch
+def timecode(t: float) -> str:
+    """Seconds as M:SS.cc (H:MM:SS.cc from an hour on), the label the reviewer saw. ffmpeg's
+    `-ss` reads the same string."""
+    cs = int(max(0.0, t) * 100 + 0.5)       # half up, as the page's Math.round; round() is half even
+    s, cs = divmod(cs, 100)
+    m, s = divmod(s, 60)
+    h, m = divmod(m, 60)
+    return f"{h}:{m:02d}:{s:02d}.{cs:02d}" if h else f"{m}:{s:02d}.{cs:02d}"
+
+
+def data_image(value) -> tuple[bytes, str] | None:
+    """The bytes and file suffix of a PNG or JPEG data URL from the page, else None. Nothing else
+    is written to disk under a name the agent will open."""
+    if not isinstance(value, str):
+        return None
+    for prefix, suffix in (("data:image/png;base64,", ".png"), ("data:image/jpeg;base64,", ".jpg")):
+        if value.startswith(prefix):
+            try:
+                return base64.b64decode(value[len(prefix):], validate=True), suffix
+            except ValueError:
+                return None
+    return None
+
+
+def _seconds(value) -> float | None:
+    try:
+        t = float(value)
+    except (TypeError, ValueError):
+        return None
+    return t if t == t and abs(t) != float("inf") else None
+
+
+def video_marks(sess: Path, item: dict, page: dict, lines: list) -> dict:
+    """The marks of one video, with their frames on disk.
+
+    The page sends each moment's frame ONCE (`frames`, keyed), because three notes on one frame
+    are one picture, and the marks point at it. Every time label is worked out here from `t`,
+    not taken from the page, so the label and the number cannot disagree. Only tools the page
+    can make are carried: a mark with any other tool keeps its note and loses its geometry.
+    """
+    frames_dir, crops_dir = sess / "frames", sess / "crops"
+    frames_dir.mkdir(exist_ok=True)
+    crops_dir.mkdir(exist_ok=True)
+    stem = item.get("asset") or slug(Path(page.get("name") or "video").stem)
+    fps, duration = item.get("fps"), item.get("duration")
+    written: dict = {}
+
+    def frame_file(key) -> str | None:
+        if key in written:
+            return written[key]
+        raw = next((f.get("image") for f in page.get("frames") or []
+                    if isinstance(f, dict) and f.get("key") == key), None)
+        img = data_image(raw)
+        t = _seconds(key)
+        if not img or t is None:
+            return None
+        path = frames_dir / f"{stem}_at_{int(round(max(0.0, t) * 1000)):08d}ms{img[1]}"
+        path.write_bytes(img[0])
+        written[key] = str(path)
+        return written[key]
+
+    def at(t: float, suffix: str = "") -> dict:
+        out = {f"t{suffix}": round(t, 3), f"timecode{suffix}": timecode(t)}
+        if fps:
+            # t is the start of the frame on screen; the small lift keeps a float a hair below
+            # an exact frame boundary from landing on the frame before.
+            out[f"frame_number{suffix}"] = int(t * fps + 1e-3)
+        if duration and t > duration + (1 / fps if fps else 0.05):
+            out[f"past_end{suffix}"] = True     # drawn on a longer version of the file
+        return out
+
+    marks = []
+    for c in page.get("comments", []):
+        if not isinstance(c, dict):
+            continue
+        tool = c.get("tool") if c.get("tool") in VIDEO_TOOLS else "note"
+        t = max(0.0, _seconds(c.get("t")) or 0.0)
+        mark = {"id": c.get("id"), "number": c.get("number"), "tool": tool,
+                "note": str(c.get("note") or "").strip(), **at(t)}
+        start_key, end_key = c.get("frame"), c.get("frame_end")
+        if tool == "span":
+            end = _seconds(c.get("t_end"))
+            end = max(0.0, end) if end is not None else t
+            if end < t:                         # drawn backward: the frames turn with the times
+                t, end, start_key, end_key = end, t, end_key, start_key
+            mark.update(at(t))
+            mark.update(at(end, "_end"))
+        if tool in DRAFT_TOOLS and isinstance(c.get("box"), dict):
+            mark["box"] = {k: _seconds(c["box"].get(k)) for k in ("x", "y", "w", "h")}
+        mark["frame"] = frame_file(start_key)
+        if tool == "span":
+            mark["frame_end"] = frame_file(end_key)
+        crop = data_image(c.get("crop")) if tool in DRAFT_TOOLS else None
+        if crop and isinstance(mark["number"], int):
+            path = crops_dir / f"{stem}_mark_{mark['number']:02d}{crop[1]}"
+            path.write_bytes(crop[0])
+            mark["crop"] = str(path)
+        marks.append(mark)
+        when = mark["timecode"] + (f" to {mark['timecode_end']}" if tool == "span" else "")
+        lines.append(f"{mark['number']}. [{when}] ({tool}) {mark['note'] or '[no text]'}")
+        for label in ("frame", "frame_end", "crop"):
+            if mark.get(label):
+                lines.append(f"   {label.replace('_', ' ')}: `{mark[label]}`")
+    out = {"marks": marks, "duration": duration, "fps": fps,
+           "width": item.get("width"), "height": item.get("height")}
+    if item.get("converted"):
+        out["played"] = item.get("played")     # the copy the browser played, and t is on it
+        out["converted"] = item["converted"]
+    return out
+
+
 def write_outputs(sess: Path, payload: dict) -> dict:
     crops_dir = sess / "crops"
     crops_dir.mkdir(exist_ok=True)
@@ -478,6 +853,8 @@ def write_outputs(sess: Path, payload: dict) -> dict:
                 if raw:
                     lines.append(f"   crop: `{crop}`")
             entry.update({"overview": str(over), "marks": marks})
+        elif page["kind"] == "video":
+            entry.update(video_marks(sess, item, page, lines))
         else:
             comments, edits = [], []
             for c in page.get("comments", []):
@@ -538,7 +915,7 @@ def write_outputs(sess: Path, payload: dict) -> dict:
         pf = Path(f)
         if not pf.is_file():
             continue
-        curr = hashlib.sha256(pf.read_bytes()).hexdigest()
+        curr = file_sha256(pf)
         staged_item = staged_by_src.get(f)
         staged_hash = staged_item.get("source_sha256") if staged_item else None
         if staged_hash:
@@ -653,8 +1030,9 @@ def foreign(method: str, headers) -> bool:
 # running, which plain 'unsafe-inline' would allow. Images are 'self' too, so a remote image in a
 # draft stays blank instead of telling its host that the draft was opened.
 CSP = ("default-src 'none'; script-src 'nonce-{nonce}'; style-src 'self' 'unsafe-inline'; "
-       "img-src 'self' data: blob:; connect-src 'self'; worker-src 'self' blob:; "
-       "font-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+       "img-src 'self' data: blob:; media-src 'self'; connect-src 'self'; "
+       "worker-src 'self' blob:; font-src 'self' data:; base-uri 'none'; form-action 'none'; "
+       "frame-ancestors 'none'")
 # Where the server writes the session globals. A literal <script> would be ambiguous once the page
 # gained a second one, and the module script cannot be the injection point because its opening tag
 # is not the bare string.
@@ -665,10 +1043,36 @@ def content_type(path: Path) -> str:
     return CONTENT_TYPES.get(path.suffix.lower(), "application/octet-stream")
 
 
+def byte_range(header: str | None, size: int):
+    """The one byte range a `Range` header asks for, as (first, last), both inclusive.
+
+    None means "send the whole file with a 200", which is what a server may do with a header it
+    does not understand, and what it does with several ranges at once. "unsatisfiable" means a 416.
+    A browser playing video asks for `bytes=0-1` (Safari, before anything else), `bytes=N-` (every
+    seek) and, rarely, `bytes=-N`, the last N bytes.
+    """
+    m = re.fullmatch(r"\s*bytes\s*=\s*(\d*)\s*-\s*(\d*)\s*", header or "")
+    if not m or not (m.group(1) or m.group(2)):
+        return None
+    first, last = m.groups()
+    if not first:                                  # a suffix: the last N bytes
+        n = int(last)
+        return (max(0, size - n), size - 1) if n and size else "unsatisfiable"
+    first = int(first)
+    if first >= size:
+        return "unsatisfiable"
+    last = min(int(last), size - 1) if last else size - 1
+    return (first, last) if last >= first else None
+
+
 def serve(sess: Path, items: list[dict], port: int = 0, test_js: str = "",
           ready=None) -> None:
     app = APP.read_text()
     sent = threading.Event()
+    # The server answers several requests at once (see Server below), and these two routes check
+    # and then act: a second tab must still not send twice, and a late draft save must still not
+    # land after a Send.
+    post_lock = threading.Lock()
 
     def stop(after: float) -> None:
         threading.Timer(after, lambda: os.kill(os.getpid(), signal.SIGTERM)).start()
@@ -688,6 +1092,58 @@ def serve(sess: Path, items: list[dict], port: int = 0, test_js: str = "",
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+        def _send_file(self, f: Path, head: bool = False):
+            """An asset, streamed in pieces, with byte ranges for video.
+
+            Safari plays no video from a server without ranges, and seeking needs them everywhere.
+            They are ADVERTISED for video only: PDF.js switches to ranged loading when it sees
+            `Accept-Ranges`, and the PDF path is tested and fast as it is.
+            """
+            ctype = content_type(f)
+            size = f.stat().st_size
+            ranged = ctype.startswith("video/")
+            rng = byte_range(self.headers.get("Range"), size) if ranged else None
+            if rng == "unsatisfiable":
+                return self._send(416, b"", "text/plain", extra=(
+                    ("Content-Range", f"bytes */{size}"), ("Accept-Ranges", "bytes")))
+            first, last = rng or (0, size - 1)
+            length = last - first + 1 if size else 0
+            self.send_response(206 if rng else 200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Content-Length", str(length))
+            if ranged:
+                self.send_header("Accept-Ranges", "bytes")
+            if rng:
+                self.send_header("Content-Range", f"bytes {first}-{last}/{size}")
+            self.end_headers()
+            if head:
+                return
+            # A browser drops a media connection the moment it seeks elsewhere, so a broken pipe
+            # here is normal and says nothing.
+            with contextlib.suppress(BrokenPipeError, ConnectionResetError), f.open("rb") as fh:
+                fh.seek(first)
+                left = length
+                while left > 0:
+                    chunk = fh.read(min(1 << 18, left))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    left -= len(chunk)
+
+        def _asset(self) -> Path | None:
+            # The browser percent-encodes the name ("a b.png" arrives as "a%20b.png").
+            f = sess / "assets" / Path(unquote(self.route[len("/asset/"):])).name
+            return f if f.is_file() else None
+
+        def do_HEAD(self):
+            if foreign("HEAD", self.headers):
+                return self._send(403, b"", "text/plain")
+            f = self._asset() if self.route.startswith("/asset/") else None
+            if not f:
+                return self._send(404, b"", "text/plain")
+            self._send_file(f, head=True)
 
         @property
         def route(self) -> str:
@@ -717,11 +1173,10 @@ def serve(sess: Path, items: list[dict], port: int = 0, test_js: str = "",
                 return self._send(200, (VENDOR / name).read_bytes(), content_type(VENDOR / name),
                                   extra=(("Cache-Control", "max-age=31536000, immutable"),))
             if self.route.startswith("/asset/"):
-                # The browser percent-encodes the name ("a b.png" arrives as "a%20b.png").
-                f = sess / "assets" / Path(unquote(self.route[len("/asset/"):])).name
-                if not f.exists():
+                f = self._asset()
+                if not f:
                     return self._send(404, b"not found", "text/plain")
-                return self._send(200, f.read_bytes(), content_type(f))
+                return self._send_file(f)
             self._send(404, b"not found", "text/plain")
 
         def do_POST(self):
@@ -729,6 +1184,10 @@ def serve(sess: Path, items: list[dict], port: int = 0, test_js: str = "",
                 return self._send(403, b"forbidden", "text/plain")
             n = int(self.headers.get("Content-Length", 0))
             raw = self.rfile.read(n) or b"{}"
+            with post_lock:
+                self._post(raw)
+
+        def _post(self, raw: bytes):
             # The draft is written on every change and is the only reason an interrupted review
             # costs nothing: a crashed tab, a closed window, a reload mid-sentence. It is deliberately
             # dumb (last write wins, whole state, no merge) because the alternative is a merge bug
@@ -738,7 +1197,10 @@ def serve(sess: Path, items: list[dict], port: int = 0, test_js: str = "",
                 # the same review, would hand the notes of this round to the next one on these files.
                 if sent.is_set():
                     return self._send(409, b'{"ok":false}', "application/json")
-                (sess / "draft.json").write_bytes(raw)
+                # Whole or not at all: a GET of the draft can now run while this writes.
+                part = sess / "draft.json.part"
+                part.write_bytes(raw)
+                part.replace(sess / "draft.json")
                 return self._send(200, b'{"ok":true}', "application/json")
             if self.route == "/close":
                 # After Send the page reports how closing its own tab went. A refused tab is closed
@@ -785,11 +1247,17 @@ def serve(sess: Path, items: list[dict], port: int = 0, test_js: str = "",
     # A taken port is an ERROR rather than a silent fallback to a random one. The whole value of
     # asking for a port is that the answer is predictable, and a fallback would hand back a working
     # page at an address the thing waiting for it is not watching.
-    class Server(socketserver.TCPServer):
+    class Server(socketserver.ThreadingMixIn, socketserver.TCPServer):
         # A finished round leaves its connections in TIME_WAIT, and without SO_REUSEADDR the next
         # round on a FIXED port failed with "Address already in use" although nothing listened
         # (measured 2026-09-30). A port that still has a live listener keeps refusing.
         allow_reuse_address = True
+        # One thread per request. A browser holds a video download open and stops reading once
+        # its buffer is full, and on a server that answers one request at a time that stalled
+        # write held back every other request, the draft save and Send among them. Daemon
+        # threads that nobody joins, so a stalled download cannot hold up the exit either.
+        daemon_threads = True
+        block_on_close = False
 
     try:
         httpd = Server(("127.0.0.1", port), Handler)
@@ -833,7 +1301,7 @@ def cmd_open(args) -> int:
                 break
             time.sleep(0.05)
         kinds = ", ".join(f"{sum(1 for i in items if i['kind'] == k)} {k}"
-                          for k in ("text", "media") if any(i["kind"] == k for i in items))
+                          for k in ("text", "media", "video") if any(i["kind"] == k for i in items))
         # A SERVER THAT NEVER CAME UP MUST NOT LOOK LIKE ONE THAT DID. The first version printed
         # "(not started)", followed it with the poll instructions, and exited 0, so a caller that
         # checked the exit code saw a healthy open and waited forever for a page that was never
@@ -1463,13 +1931,399 @@ elif mode == "fail":
             check("the vendor folder cannot be walked out of",
                   fetch(base + "vendor/..%2f..%2fSKILL.md")[1].get("status"), 404)
 
+    video_selftest(check)
+
     if args.browser:
         browser_selftest(check)
+        browser_video_selftest(check)
     else:
         print("note: the browser cases need --browser")
 
     print(f"\n{'PASS' if not failures else 'FAIL'}: {len(failures)} failure(s)")
     return 1 if failures else 0
+
+
+# What ffprobe printed for four real kinds of file, cut to the fields probe_video reads. Each one
+# is a case that a first version of the parser got wrong somewhere.
+PROBE_PHONE = {  # a portrait clip from a phone: landscape pixels and a rotation
+    "streams": [{"codec_type": "video", "codec_name": "hevc", "pix_fmt": "yuv420p10le",
+                 "width": 1920, "height": 1080, "avg_frame_rate": "30000/1001",
+                 "r_frame_rate": "90000/1", "side_data_list": [{"rotation": -90}]},
+                {"codec_type": "audio", "codec_name": "aac"}],
+    "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2", "duration": "12.345"}}
+PROBE_RECORDER = {  # a MediaRecorder WebM: a timebase for a rate, and no duration
+    "streams": [{"codec_type": "video", "codec_name": "vp9", "pix_fmt": "yuv420p",
+                 "width": 640, "height": 360, "avg_frame_rate": "0/0",
+                 "r_frame_rate": "1000/1"},
+                {"codec_type": "audio", "codec_name": "opus"}],
+    "format": {"format_name": "matroska,webm"}}
+PROBE_COVER = {  # cover art first, then the picture, PCM sound and a timecode track
+    "streams": [{"codec_type": "video", "codec_name": "mjpeg", "width": 600, "height": 600,
+                 "disposition": {"attached_pic": 1}},
+                {"codec_type": "video", "codec_name": "h264", "pix_fmt": "yuv420p",
+                 "width": 1080, "height": 1920, "avg_frame_rate": "25/1"},
+                {"codec_type": "audio", "codec_name": "pcm_s16le"},
+                {"codec_type": "data", "codec_name": "tmcd"}],
+    "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2", "duration": "4.0"}}
+PROBE_ANAMORPHIC = {  # stored 1440 wide, shown 1920 wide
+    "streams": [{"codec_type": "video", "codec_name": "h264", "pix_fmt": "yuv420p",
+                 "width": 1440, "height": 1080, "sample_aspect_ratio": "4:3",
+                 "avg_frame_rate": "25/1"}],
+    "format": {"duration": "3.0"}}
+
+
+def video_selftest(check) -> None:
+    """The video path without a browser: ranges, the codec decision, the probe, staging with a
+    stub ffmpeg, one real conversion when ffmpeg is installed, the batch and the server."""
+    # ---- ranges, the way a browser asks for them -----------------------------------------
+    check("a range of two bytes, the way Safari opens a video", byte_range("bytes=0-1", 100), (0, 1))
+    check("an open range runs to the end", byte_range("bytes=10-", 100), (10, 99))
+    check("a suffix range is the last bytes", byte_range("bytes=-5", 100), (95, 99))
+    check("a range past the end of the file is a 416",
+          byte_range("bytes=100-", 100), "unsatisfiable")
+    check("an empty suffix is a 416", byte_range("bytes=-0", 100), "unsatisfiable")
+    check("any range of an empty file is a 416", byte_range("bytes=0-", 0), "unsatisfiable")
+    check("an end past the file is cut to the last byte", byte_range("bytes=5-500", 100), (5, 99))
+    check("several ranges get the whole file", byte_range("bytes=0-1,5-6", 100), None)
+    check("a header that is not a byte range gets the whole file",
+          byte_range("items=0-1", 100), None)
+
+    # ---- numbers ffprobe and the page hand over ------------------------------------------
+    check("an NTSC rate is read as 29.97", _rate("30000/1001"), 29.97)
+    check("a timebase is not a frame rate", _rate("1000/1"), None)
+    check("0/0 and N/A are no rate", [_rate("0/0"), _rate("N/A")], [None, None])
+    check("a timecode under a minute", timecode(12.4), "0:12.40")
+    check("a timecode over an hour", timecode(3725.019), "1:02:05.02")
+    check("a timecode rounds half up, as the page does", timecode(0.125), "0:00.13")
+
+    # ---- copy, remux or convert -----------------------------------------------------------
+    def plan(vcodec, acodec="aac", pix="yuv420p", suffix=".mp4", duration=5.0):
+        return video_plan({"vcodec": vcodec, "acodec": acodec, "pix_fmt": pix,
+                           "duration": duration}, suffix)
+    check("H.264 in MP4 is copied", plan("h264")["action"], "copy")
+    check("H.264 in a QuickTime file is remuxed, not re-encoded",
+          [plan("h264", suffix=".mov")[k] for k in ("action", "ext")], ["remux", ".mp4"])
+    check("HEVC is converted", plan("hevc")["action"], "convert")
+    check("10-bit H.264 is converted", plan("h264", pix="yuv420p10le")["video"], "encode")
+    check("AV1 and ProRes are converted",
+          [plan("av1")["action"], plan("prores", suffix=".mov")["action"]], ["convert", "convert"])
+    pcm = plan("h264", acodec="pcm_s16le", suffix=".mov")
+    check("PCM sound keeps the picture and re-encodes only the sound",
+          [pcm["action"], pcm["video"], pcm["audio"]], ["convert", "copy", "encode"])
+    check("a silent H.264 file is copied", plan("h264", acodec=None)["action"], "copy")
+    check("VP9 in WebM is copied", plan("vp9", acodec="opus", suffix=".webm")["action"], "copy")
+    check("a WebM without a duration is rewritten so it can be seeked",
+          [plan("vp9", acodec="opus", suffix=".webm", duration=None)[k] for k in ("action", "ext")],
+          ["remux", ".webm"])
+    check("without ffprobe the file is copied", video_plan(None, ".mov")["action"], "copy")
+    conv = ffmpeg_command("ffmpeg", plan("hevc"), Path("in.mov"), Path("out.mp4"))
+    check("a conversion makes 8-bit 4:2:0 H.264 with even sides and the index in front",
+          all(x in conv for x in ("libx264", "yuv420p", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+                                  "+faststart")), True)
+    check("a conversion takes the first picture and sound and leaves data tracks out",
+          all(x in conv for x in ("0:V:0", "0:a:0?", "-dn", "-sn")), True)
+    rmx = ffmpeg_command("ffmpeg", plan("vp9", "opus", suffix=".webm", duration=None),
+                         Path("in.webm"), Path("out.webm"))
+    check("a remux copies both streams", rmx.count("copy"), 2)
+    check("a WebM gets no MP4 flags", "-movflags" in rmx, False)
+
+    # ---- probe_video on what ffprobe really prints ----------------------------------------
+    orig_which = shutil.which
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        probe_json, ffmpeg_log, ffmpeg_mode = tmp / "probe.json", tmp / "ffmpeg.log", tmp / "mode"
+        stub_probe = tmp / "ffprobe"
+        stub_probe.write_text(f"#!{sys.executable}\nimport sys\n"
+                              f"sys.stdout.write(open({str(probe_json)!r}).read())\n")
+        stub_ffmpeg = tmp / "ffmpeg"
+        stub_ffmpeg.write_text(f"""#!{sys.executable}
+import json, sys
+from pathlib import Path
+with open({str(ffmpeg_log)!r}, "a") as log:
+    log.write(json.dumps(sys.argv[1:]) + "\\n")
+if Path({str(ffmpeg_mode)!r}).read_text().strip() == "fail":
+    sys.stderr.write("Unknown encoder 'libx264'\\n")
+    sys.exit(1)
+Path(sys.argv[-1]).write_bytes(b"converted")
+""")
+        for stub in (stub_probe, stub_ffmpeg):
+            stub.chmod(0o755)
+        ffmpeg_log.write_text("")
+        ffmpeg_mode.write_text("ok")
+        stubs = {"ffprobe": str(stub_probe), "ffmpeg": str(stub_ffmpeg)}
+
+        def probe_of(case):
+            probe_json.write_text(json.dumps(case))
+            shutil.which = lambda cmd: stubs.get(cmd) or orig_which(cmd)
+            try:
+                return probe_video(tmp / "any.mov")
+            finally:
+                shutil.which = orig_which
+
+        phone = probe_of(PROBE_PHONE)
+        check("a rotated phone clip is portrait", [phone["width"], phone["height"]], [1080, 1920])
+        check("the frame rate is the average one, not the timebase guess", phone["fps"], 29.97)
+        check("the duration comes from the container", phone["duration"], 12.345)
+        rec = probe_of(PROBE_RECORDER)
+        check("a MediaRecorder WebM has no frame rate and no duration",
+              [rec["fps"], rec["duration"]], [None, None])
+        cover = probe_of(PROBE_COVER)
+        check("cover art is not the picture", [cover["vcodec"], cover["width"]], ["h264", 1080])
+        check("anamorphic pixels are shown at their display width",
+              probe_of(PROBE_ANAMORPHIC)["width"], 1920)
+        check("a file with no picture is no video",
+              probe_of({"streams": [{"codec_type": "audio", "codec_name": "aac"}],
+                        "format": {"duration": "3"}})["vcodec"], None)
+
+        # ---- staging with the stubs ---------------------------------------------------------
+        sess = tmp / "sess"
+        sess.mkdir()
+        clip = tmp / "phone clip.mov"
+        clip.write_bytes(b"hevc bytes, round one")
+        probe_json.write_text(json.dumps(PROBE_PHONE))
+        shutil.which = lambda cmd: stubs.get(cmd) or orig_which(cmd)
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err):
+                first = stage_inputs([clip], sess)[0]
+                runs_after_first = len(ffmpeg_log.read_text().splitlines())
+                again = stage_inputs([clip], sess)[0]
+                runs_after_second = len(ffmpeg_log.read_text().splitlines())
+                clip.write_bytes(b"hevc bytes, a new render")
+                stage_inputs([clip], sess)
+                runs_after_render = len(ffmpeg_log.read_text().splitlines())
+        finally:
+            shutil.which = orig_which
+        check("a video is one item of kind video", first["kind"], "video")
+        check("HEVC is converted once", runs_after_first, 1)
+        check("the next round on the same bytes converts nothing", runs_after_second, 1)
+        check("a new render is converted afresh", runs_after_render, 2)
+        check("only the conversion of the current render is kept",
+              len(list((sess / "converted").iterdir())), 1)
+        check("the converted copy is served as MP4, its address carries the hash",
+              re.fullmatch(r"/asset/d1_phone_clip\.mp4\?v=[0-9a-f]{12}", again["url"]) is not None,
+              True)
+        check("the item says it was converted", again["converted"], "h264")
+        check("the item carries the display size and rate",
+              [again["width"], again["height"], again["fps"]], [1080, 1920, 29.97])
+        check("the conversion is announced", "converting phone clip.mov" in err.getvalue(), True)
+
+        ffmpeg_mode.write_text("fail")
+        clip.write_bytes(b"hevc bytes, a render ffmpeg cannot read")
+        shutil.which = lambda cmd: stubs.get(cmd) or orig_which(cmd)
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err):
+                failed = stage_inputs([clip], sess)[0]
+        finally:
+            shutil.which = orig_which
+        check("a failed conversion stages the original", failed["url"].split("?")[0],
+              "/asset/d1_phone_clip.mov")
+        check("and says why", "could not convert phone clip.mov (Unknown encoder" in err.getvalue(),
+              True)
+        check("and claims no conversion", failed["converted"], None)
+
+        shutil.which = lambda cmd: None if cmd in ("ffprobe", "ffmpeg") else orig_which(cmd)
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err):
+                bare = stage_inputs([clip], sess)[0]
+        finally:
+            shutil.which = orig_which
+        check("without ffmpeg the file is staged as it is",
+              [bare["url"].split("?")[0], bare["fps"]], ["/asset/d1_phone_clip.mov", None])
+        check("and the reviewer's agent is told how to fix it",
+              "install ffmpeg" in err.getvalue(), True)
+
+        probe_json.write_text(json.dumps({"streams": [{"codec_type": "audio",
+                                                       "codec_name": "aac"}]}))
+        song = tmp / "song.mp4"
+        song.write_bytes(b"audio only")
+        card = tmp / "card.png"
+        card.write_bytes(base64.b64decode(PNG_1PX))
+        shutil.which = lambda cmd: stubs.get(cmd) or orig_which(cmd)
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err):
+                mixed = stage_inputs([song, card], sess)
+        finally:
+            shutil.which = orig_which
+        check("a file with no picture is skipped with its reason",
+              [[i["name"] for i in mixed], "song.mp4: it has no video stream" in err.getvalue()],
+              [["card.png"], True])
+
+        # A render that rewrites its file in place (ffmpeg -y does) must not change the copy under
+        # review: the staged bytes are what the receipt certifies and what the page has buffered.
+        probe_json.write_text(json.dumps({"streams": [
+            {"codec_type": "video", "codec_name": "h264", "pix_fmt": "yuv420p", "width": 1080,
+             "height": 1920, "avg_frame_rate": "30/1"}], "format": {"duration": "2"}}))
+        short = tmp / "short.mp4"
+        short.write_bytes(b"render one")
+        shutil.which = lambda cmd: stubs.get(cmd) or orig_which(cmd)
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                staged = stage_inputs([short], sess)[0]
+        finally:
+            shutil.which = orig_which
+        with short.open("r+b") as fh:
+            fh.write(b"render two")
+        check("a render in place leaves the reviewed copy alone",
+              (sess / "assets" / Path(staged["url"].split("?")[0]).name).read_bytes(),
+              b"render one")
+
+        big = tmp / "big.bin"
+        big.write_bytes(os.urandom(3 << 20))
+        check("the chunked hash is the hash", file_sha256(big),
+              hashlib.sha256(big.read_bytes()).hexdigest())
+
+    # ---- one real conversion, when ffmpeg is here -----------------------------------------
+    if shutil.which("ffmpeg") and shutil.which("ffprobe"):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            src = tmp / "old.mov"
+            made = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f",
+                                   "lavfi", "-i", "testsrc2=s=180x320:r=10:d=1", "-c:v", "mpeg4",
+                                   str(src)], capture_output=True, timeout=60)
+            if made.returncode == 0:
+                sess = tmp / "sess"
+                sess.mkdir()
+                with contextlib.redirect_stderr(io.StringIO()):
+                    item = stage_inputs([src], sess)[0]
+                played = probe_video(Path(item["played"])) or {}
+                check("a real MPEG-4 QuickTime file comes out as H.264 that browsers play",
+                      [played.get("vcodec"), played.get("pix_fmt"), item["fps"], item["duration"]],
+                      ["h264", "yuv420p", 10.0, 1.0])
+            else:
+                print("skip: ffmpeg could not make the conversion fixture")
+    else:
+        print("skip: the real conversion case needs ffmpeg and ffprobe")
+
+    # ---- the batch -------------------------------------------------------------------------
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        sess = tmp / "sess"
+        sess.mkdir()
+        (sess / "items.json").write_text(json.dumps([
+            {"kind": "video", "id": "d1", "asset": "d1_short", "name": "short.mp4",
+             "source": str(tmp / "short.mp4"), "duration": 8.0, "fps": 30.0,
+             "width": 1080, "height": 1920, "converted": "h264",
+             "played": str(sess / "assets" / "d1_short.mp4")}]))
+        png = "data:image/png;base64," + PNG_1PX
+        jpeg = "data:image/jpeg;base64," + base64.b64encode(b"\xff\xd8\xff\xe0 tiny").decode()
+        batch = write_outputs(sess, {"pages": [{
+            "kind": "video", "item": "d1", "name": "short.mp4",
+            "frames": [{"key": "3.217", "image": jpeg}, {"key": "4.883", "image": jpeg},
+                       {"key": "0.017", "image": "data:image/svg+xml;base64,PHN2Zy8+"}],
+            "comments": [
+                {"id": "m_1", "number": 1, "tool": "rect", "note": " subtitle too low ",
+                 "t": 3.2166666, "frame": "3.217", "crop": png,
+                 "box": {"x": 0.2, "y": 0.6, "w": 0.5, "h": 0.15}},
+                {"id": "m_2", "number": 2, "tool": "note", "note": "music too loud",
+                 "t": 3.2166666, "frame": "3.217", "crop": png},
+                {"id": "m_3", "number": 3, "tool": "span", "note": "drags",
+                 "t": 4.8833, "t_end": 3.2166666, "frame": "4.883", "frame_end": "3.217"},
+                {"id": "m_4", "number": 4, "tool": "laser", "note": "odd tool", "t": 0.0166,
+                 "frame": "0.017", "box": {"x": 0.1, "y": 0.1, "w": 0.1, "h": 0.1}},
+                {"id": "m_5", "number": 5, "tool": "note", "note": "drawn on a longer cut",
+                 "t": 9.5, "frame": "9.500"}]}]})
+        page = batch["pages"][0]
+        marks = {m["number"]: m for m in page["marks"]}
+        check("a video page is its own kind", page["kind"], "video")
+        check("the timecode is worked out from t", [marks[1]["timecode"], marks[1]["t"]],
+              ["0:03.22", 3.217])
+        check("the frame number is the frame on screen", marks[1]["frame_number"], 96)
+        check("two notes on one frame share one picture",
+              [marks[1]["frame"] == marks[2]["frame"], len(list((sess / "frames").iterdir()))],
+              [True, 2])
+        check("a frame is a JPEG named by its moment", Path(marks[1]["frame"]).name,
+              "d1_short_at_00003217ms.jpg")
+        check("a span runs forward even when drawn backward",
+              [marks[3]["t"], marks[3]["t_end"], marks[3]["timecode_end"]], [3.217, 4.883, "0:04.88"])
+        check("a span has a frame at each end",
+              [Path(marks[3]["frame"]).name, Path(marks[3]["frame_end"]).name],
+              ["d1_short_at_00003217ms.jpg", "d1_short_at_00004883ms.jpg"])
+        check("a shape has a crop, a note has none",
+              [Path(marks[1]["crop"]).name, "crop" in marks[2]], ["d1_short_mark_01.png", False])
+        check("a tool the page cannot make is carried as a plain note",
+              [marks[4]["tool"], "box" in marks[4]], ["note", False])
+        check("an image that is not PNG or JPEG is never written", marks[4]["frame"], None)
+        check("a moment past the end of this version is flagged, not moved",
+              [marks[5]["t"], marks[5].get("past_end")], [9.5, True])
+        check("the note is trimmed", marks[1]["note"], "subtitle too low")
+        check("the page says which copy t is on", page.get("played"),
+              str(sess / "assets" / "d1_short.mp4"))
+        md = (sess / "marks.md").read_text()
+        check("marks.md gives the moment and the span",
+              "1. [0:03.22] (rect) subtitle too low" in md
+              and "3. [0:03.22 to 0:04.88] (span) drags" in md, True)
+        check("the receipt counts every video note",
+              json.loads((sess / "receipt.json").read_text())["items"], 5)
+
+    # ---- the server --------------------------------------------------------------------------
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        sess = tmp / "sess"
+        sess.mkdir()
+        clip = tmp / "clip.mp4"
+        payload = os.urandom(1 << 16)
+        clip.write_bytes(payload)
+        pdf = tmp / "statement.pdf"
+        make_fixture_pdf(pdf, FIXTURE_PAGES)
+        shutil.which = lambda cmd: None if cmd in ("ffprobe", "ffmpeg") else orig_which(cmd)
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                items = stage_inputs([clip, pdf], sess)
+        finally:
+            shutil.which = orig_which
+        with serving(sess, items) as base:
+            url = base + items[0]["url"].lstrip("/")
+            _, headers = fetch(base)
+            check("the policy lets the page play its own video",
+                  "media-src 'self'" in headers.get("Content-Security-Policy", ""), True)
+            body, h = fetch_bytes(url, {"Range": "bytes=0-1"})
+            check("Safari's first request gets two bytes and a 206",
+                  [h["status"], body, h.get("Content-Range"), h.get("Accept-Ranges")],
+                  [206, payload[:2], f"bytes 0-1/{len(payload)}", "bytes"])
+            check("a video is served as video", h.get("Content-Type"), "video/mp4")
+            body, h = fetch_bytes(url, {"Range": "bytes=65000-"})
+            check("a seek gets the rest of the file", [h["status"], body], [206, payload[65000:]])
+            body, h = fetch_bytes(url, {"Range": "bytes=-100"})
+            check("a suffix range gets the last bytes", body, payload[-100:])
+            body, h = fetch_bytes(url, {"Range": "bytes=70000-"})
+            check("a range past the end is a 416 that names the size",
+                  [h["status"], h.get("Content-Range")], [416, f"bytes */{len(payload)}"])
+            body, h = fetch_bytes(url)
+            check("without a range the whole file comes with a 200 and says ranges work",
+                  [h["status"], len(body), h.get("Accept-Ranges")], [200, len(payload), "bytes"])
+            body, h = fetch_bytes(url, method="HEAD")
+            check("HEAD gives the size and no body",
+                  [h["status"], h.get("Content-Length"), body], [200, str(len(payload)), b""])
+            _, h = fetch_bytes(base + items[1]["url"].lstrip("/"), {"Range": "bytes=0-1"})
+            check("a PDF is still sent whole, so PDF.js loads it as before",
+                  [h["status"], h.get("Accept-Ranges")], [200, None])
+
+        # A browser holds a video download open and stops reading. On a server that answered
+        # one request at a time, that held back the draft save and Send.
+        big = sess / "assets" / Path(items[0]["url"].split("?")[0]).name
+        big.write_bytes(b"\0" * (32 << 20))
+        with serving(sess, items) as base:
+            stalled = socket.socket()
+            stalled.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+            stalled.connect(("127.0.0.1", urlsplit(base).port))
+            stalled.sendall(f"GET /asset/{big.name} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".encode())
+            time.sleep(0.3)
+            t0 = time.time()
+            try:
+                _, h = fetch_bytes(base + "draft", {"Content-Type": "application/json"}, "POST",
+                                   b'{"overall": "still saving"}')
+                answered = h["status"]
+            except OSError as e:
+                answered = f"no answer ({e})"
+            check("a stalled video download does not hold back a draft save",
+                  [answered, time.time() - t0 < 2], [200, True])
+            stalled.close()
+            check("the draft is written whole",
+                  json.loads((sess / "draft.json").read_text()).get("overall"), "still saving")
 
 
 @contextlib.contextmanager
@@ -1491,12 +2345,19 @@ def serving(sess: Path, items: list[dict], test_js: str = ""):
 
 
 def fetch(url: str) -> tuple[str, dict]:
-    req = urllib.request.Request(url, headers={"Host": "127.0.0.1"})
+    body, headers = fetch_bytes(url)
+    return body.decode("utf-8", "replace"), headers
+
+
+def fetch_bytes(url: str, headers: dict | None = None, method: str = "GET",
+                data: bytes | None = None) -> tuple[bytes, dict]:
+    req = urllib.request.Request(url, headers={"Host": "127.0.0.1", **(headers or {})},
+                                 method=method, data=data)
     try:
         with urllib.request.urlopen(req, timeout=5) as r:
-            return r.read().decode("utf-8", "replace"), {**dict(r.headers), "status": r.status}
+            return r.read(), {**dict(r.headers), "status": r.status}
     except urllib.error.HTTPError as e:
-        return "", {"status": e.code}
+        return e.read(), {**dict(e.headers), "status": e.code}
 
 
 # Injected ONLY by the browser selftest, through serve(test_js=...). The shipped page never sees
@@ -1798,6 +2659,176 @@ window.__TEST__ = async (api) => {
 };
 """
 
+# The video session: d1 is the red-then-blue clip, d2 a draft, d3 a file the browser cannot play.
+# The draft saved before the page opened holds a span and a box on d1.
+TEST_VIDEO_JS = r"""
+window.__TEST__ = async (api) => {
+  const out = [];
+  const say = (name, got, want) => out.push([name, got, want]);
+  const until = async (fn, ms) => { const t0 = Date.now();
+    while (Date.now() - t0 < (ms || 20000)) { try { if (fn()) return true; } catch (e) {}
+      await new Promise(r => setTimeout(r, 60)); } return false; };
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const mode = new URLSearchParams(location.search).get("mode") || "wide";
+  try {
+    const s = api.SURFACES.get("d1"), broken = api.SURFACES.get("d3"), v = s.video;
+    await until(() => v.readyState >= 2 && v.duration > 0);
+    say("the video loads and knows its length", Math.round(v.duration * 10) / 10, 2);
+    say("the notes on a video come back from the saved draft",
+        api.marks.filter(m => m.item === "d1").map(m => m.tool).sort(), ["rect", "span"]);
+    await until(() => s.markers.querySelectorAll(".vmk").length === 2);
+    say("and sit on the timeline", s.markers.querySelectorAll(".vmk").length, 2);
+    say("the card of a restored span names both moments",
+        [...document.querySelectorAll("#feed .card .where")]
+          .some(e => e.textContent.includes("0:00.25 to 0:00.75")), true);
+
+    const r = s.box.getBoundingClientRect();
+    say("the picture keeps the shape of the video", Math.abs(r.width / r.height - 180 / 320) < 0.02, true);
+    say("a Short fits the height of the window", r.height <= innerHeight - 100 && r.height > 150, true);
+
+    say("the player can seek, so the server answers byte ranges", await api.seekAndWait(s, 1.55), true);
+    say("and lands where it was sent", Math.abs(v.currentTime - 1.55) < 0.01, true);
+
+    // The pen on a playing video.
+    api.setTool("ellipse");
+    v.currentTime = 0.3;
+    await new Promise(res => v.addEventListener("seeked", res, { once: true }));
+    await v.play().catch(() => {});
+    await sleep(150);
+    const cv = s.marksCanvas, cr = cv.getBoundingClientRect();
+    const pen = (type, fx, fy) => cv.dispatchEvent(new PointerEvent(type, {
+      pointerId: 1, bubbles: true, isPrimary: true, pointerType: "mouse", button: 0,
+      buttons: type === "pointerup" ? 0 : 1,
+      clientX: cr.left + fx * cr.width, clientY: cr.top + fy * cr.height }));
+    const n0 = api.marks.length;
+    pen("pointerdown", 0.2, 0.2); pen("pointermove", 0.6, 0.4); pen("pointerup", 0.6, 0.4);
+    const drawn = api.marks.length > n0 ? api.marks[api.marks.length - 1] : null;
+    say("the pen stops the video", v.paused, true);
+    say("the mark belongs to the frame on screen",
+        !!drawn && drawn.tool === "ellipse" && Math.abs(drawn.t - v.currentTime) < 1e-6, true);
+    say("that moment is the middle of a frame",
+        !!drawn && Math.abs(((drawn.t * 10) % 1) - 0.5) < 1e-3, true);
+    await until(() => !v.seeking); await sleep(80);
+    const ink = () => { if (!cv.width) return 0;
+      const d = cv.getContext("2d").getImageData(0, 0, cv.width, cv.height).data;
+      let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i]) n++; return n; };
+    say("the mark is drawn at its moment", ink() > 50, true);
+
+    const key = (k, target) => (target || s.player).dispatchEvent(
+      new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true }));
+    const settled = async () => { await until(() => !v.seeking); await sleep(80); };
+    const t0 = v.currentTime;
+    key("."); await settled();
+    say("a period steps one frame on", Math.round((v.currentTime - t0) * 1000), 100);
+    say("and the mark is not shown off its frame", ink(), 0);
+    key(","); await settled();
+    say("a comma steps back onto it", ink() > 50, true);
+
+    const n1 = api.marks.length;
+    key("i");
+    for (let i = 0; i < 5; i++) key(".");
+    key("o");
+    const span = api.marks[api.marks.length - 1];
+    say("i, then o five frames on, makes a span of half a second",
+        span && span.tool === "span" ? Math.round((span.t_end - span.t) * 1000) : null, 500);
+    key("n");
+    const note = api.marks[api.marks.length - 1];
+    say("n makes a note at the playhead",
+        !!note && note.tool === "note" && Math.abs(note.t - v.currentTime) < 1e-6, true);
+    say("each key made one mark", api.marks.length - n1, 2);
+
+    const navState = () => document.body.className + "|" + document.getElementById("nav").className
+      + "|" + document.getElementById("nav").style.display;
+    // Focus on the player itself: with the caret in a note the page-wide handler stands aside for
+    // its own reason, and this case would pass with the player's keys leaking.
+    s.player.focus();
+    const before = navState();
+    key("i"); key("o");
+    say("o in the player leaves the contents list alone", navState(), before);
+    say("a span of one moment is refused, with the reason", s.sayEl.textContent.includes("two moments"), true);
+    key("Escape");
+
+    document.activeElement?.blur();
+    const t1 = v.currentTime;
+    document.body.dispatchEvent(new KeyboardEvent("keydown", { key: ".", bubbles: true }));
+    await sleep(150);
+    say("a period outside the player does not move the video", v.currentTime, t1);
+    s.playBtn.focus();
+    key(" ", s.playBtn);
+    await sleep(100);
+    say("Space on the Play button is left to the button", v.paused, true);
+
+    // What Send makes of it: one frame per moment, and each frame is that moment.
+    api.marks.length = 0;
+    api.marks.push(
+      { id: 801, item: "d1", tool: "note", note: "red part", t: 0.55 },
+      { id: 802, item: "d1", tool: "rect", note: "blue part", t: 1.55,
+        x0: 0.1, y0: 0.1, x1: 0.5, y1: 0.3, path: [] },
+      { id: 803, item: "d1", tool: "span", note: "both", t: 0.55, t_end: 1.55 });
+    const batch = await api.buildBatch();
+    const vp = batch.pages.find(p => p.kind === "video" && p.item === "d1");
+    say("Send makes a video page", !!vp, true);
+    say("each moment is one frame", vp ? vp.frames.map(f => f.key).sort() : null, ["0.550", "1.550"]);
+    const colour = async (url) => {
+      const img = new Image();
+      await new Promise(res => { img.onload = res; img.onerror = res; img.src = url; });
+      const c = document.createElement("canvas"); c.width = img.width; c.height = img.height;
+      const x = c.getContext("2d"); x.drawImage(img, 0, 0);
+      const d = x.getImageData(Math.floor(img.width * 0.8), Math.floor(img.height * 0.9), 1, 1).data;
+      return d[0] > 150 && d[2] < 100 ? "red" : d[2] > 150 && d[0] < 100 ? "blue" : `${d[0]},${d[1]},${d[2]}`; };
+    const frameAt = k => (vp?.frames.find(f => f.key === k) || {}).image;
+    say("the frame at 0.55 s is from the red second", await colour(frameAt("0.550")), "red");
+    say("the frame at 1.55 s is from the blue second", await colour(frameAt("1.550")), "blue");
+    say("a frame is sent as JPEG", (frameAt("0.550") || "").startsWith("data:image/jpeg"), true);
+    const byId = Object.fromEntries((vp?.comments || []).map(c => [c.id, c]));
+    say("a shape carries its box and its crop, a note neither",
+        [!!byId.m_802?.crop, !!byId.m_802?.box, "crop" in (byId.m_801 || {})], [true, true, false]);
+    say("a span names the frame at each end", [byId.m_803?.frame, byId.m_803?.frame_end],
+        ["0.550", "1.550"]);
+
+    // A note made on a longer render gets no picture: the last frame is not its moment.
+    api.marks.push({ id: 805, item: "d1", tool: "note", note: "longer cut", t: 9.5 });
+    const late = (await api.buildBatch()).pages.find(p => p.item === "d1");
+    say("a moment past the end of this render has no frame",
+        late ? [late.frames.some(f => f.key === "9.500"), late.comments.some(c => c.id === "m_805")] : null,
+        [false, true]);
+
+    // A mark from a picture, restored onto the video (ids are positions): an orphan, never a hang.
+    api.marks.push({ id: 806, item: "d1", tool: "ellipse", note: "from a picture",
+                     x0: 0.1, y0: 0.1, x1: 0.3, y1: 0.3, path: [] });
+    let orphanBatch = null;
+    try { orphanBatch = await Promise.race([api.buildBatch(), sleep(15000).then(() => null)]); }
+    catch (e) { orphanBatch = String(e); }
+    say("a mark without a moment on a video does not stop Send",
+        !!orphanBatch && typeof orphanBatch === "object", true);
+    say("and travels with the overall note",
+        orphanBatch && typeof orphanBatch === "object" ? orphanBatch.note.includes("from a picture") : null, true);
+    api.marks.length = 0;
+
+    await until(() => broken.sayEl.textContent.length > 0, 8000);
+    say("a file the browser cannot play says so", broken.sayEl.textContent.includes("cannot play"), true);
+    api.marks.push({ id: 804, item: "d3", tool: "note", note: "still mine", t: 0 });
+    const b2 = await api.buildBatch();
+    const bp = b2.pages.find(p => p.item === "d3");
+    say("a note on it is still sent, without a frame", bp ? [bp.comments.length, bp.frames.length] : null, [1, 0]);
+    api.marks.length = 0;
+
+    if (mode === "narrow") {
+      say("no horizontal overflow at this width",
+          document.documentElement.scrollWidth <= window.innerWidth, true);
+      const small = [...s.player.querySelectorAll("button, select")]
+        .filter(b => b.offsetParent !== null)
+        .filter(b => b.getBoundingClientRect().height < 24 || b.getBoundingClientRect().width < 24);
+      say("every control of the player is at least 24 px", small.map(b => b.className), []);
+    }
+  } catch (e) {
+    out.push(["the browser test itself ran to the end", String(e && e.stack || e), true]);
+  }
+  fetch("/draft", { method: "POST", headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ __test__: out }) });
+};
+"""
+
 
 def browser_selftest(check) -> None:
     chrome = find_chrome()
@@ -1813,37 +2844,106 @@ def browser_selftest(check) -> None:
         draft = tmp / "draft.md"
         draft.write_text(FIXTURE_DRAFT)
         items = stage_inputs([pdf, draft], sess)
-        with serving(sess, items, test_js=TEST_JS) as base:
-            for mode, size in (("wide", "1440,900"), ("narrow", "390,844")):
-                (sess / "draft.json").unlink(missing_ok=True)
-                # No --dump-dom and no virtual time: this Chrome prints its DOM and then hangs on
-                # shutdown (measured 2026-10-02, Chrome 141), and virtual time freezes the page
-                # before pdf.js has drawn anything. The page reports its own results instead, and
-                # the browser is killed as soon as they arrive.
-                proc = subprocess.Popen(
-                    [chrome, "--headless=new", "--disable-gpu", "--no-first-run",
-                     "--no-default-browser-check", "--disable-extensions",
-                     "--disable-background-networking", "--disable-component-update",
-                     "--disable-sync", f"--user-data-dir={tmp}/profile-{mode}",
-                     f"--window-size={size}", "--force-device-scale-factor=2",
-                     f"{base}?mode={mode}"],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                results = None
-                deadline = time.time() + 90
-                while time.time() < deadline and results is None:
-                    f = sess / "draft.json"
-                    if f.exists():
-                        try:
-                            results = json.loads(f.read_text()).get("__test__")
-                        except ValueError:
-                            results = None
-                    time.sleep(0.05)
-                proc.terminate()
-                if results is None:
-                    check(f"the browser reported its results ({mode})", "no results", "results")
-                    continue
-                for name, got, want in results:
-                    check(f"{name} [{mode}]", got, want)
+        run_in_chrome(chrome, sess, items, TEST_JS, tmp, check)
+
+
+def run_in_chrome(chrome: str, sess: Path, items: list, test_js: str, tmp: Path, check,
+                  draft: dict | None = None, label: str = "") -> None:
+    """Serve the session with `test_js`, open it in headless Chrome at desktop and at phone
+    width, and turn what the page reports into checks. `draft` is put in place before each
+    width, so a case can test what comes back from a saved draft."""
+    with serving(sess, items, test_js=test_js) as base:
+        for mode, size in (("wide", "1440,900"), ("narrow", "390,844")):
+            (sess / "draft.json").unlink(missing_ok=True)
+            if draft is not None:
+                (sess / "draft.json").write_text(json.dumps(draft))
+            # No --dump-dom and no virtual time: this Chrome prints its DOM and then hangs on
+            # shutdown (measured 2026-10-02, Chrome 141), and virtual time freezes the page
+            # before pdf.js has drawn anything. The page reports its own results instead, and
+            # the browser is killed as soon as they arrive.
+            proc = subprocess.Popen(
+                [chrome, "--headless=new", "--disable-gpu", "--no-first-run",
+                 "--no-default-browser-check", "--disable-extensions",
+                 "--disable-background-networking", "--disable-component-update",
+                 "--disable-sync", "--autoplay-policy=no-user-gesture-required",
+                 f"--user-data-dir={tmp}/profile-{label}{mode}",
+                 f"--window-size={size}", "--force-device-scale-factor=2",
+                 f"{base}?mode={mode}"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            results = None
+            deadline = time.time() + 90
+            while time.time() < deadline and results is None:
+                f = sess / "draft.json"
+                if f.exists():
+                    try:
+                        results = json.loads(f.read_text()).get("__test__")
+                    except ValueError:
+                        results = None
+                time.sleep(0.05)
+            proc.terminate()
+            if results is None:
+                check(f"the browser reported its results ({label}{mode})", "no results", "results")
+                continue
+            for name, got, want in results:
+                check(f"{name} [{mode}]", got, want)
+
+
+def video_fixture(folder: Path) -> Path | None:
+    """Two seconds, one red and one blue, 9:16 at 10 frames a second, so a frame read back from
+    the page says by its colour which second it came from. VP9 first, because a Chromium build
+    without the H.264 decoder still plays it."""
+    if not shutil.which("ffmpeg"):
+        return None
+    src = ["-f", "lavfi", "-i", "color=c=red:s=180x320:r=10:d=1",
+           "-f", "lavfi", "-i", "color=c=blue:s=180x320:r=10:d=1",
+           "-filter_complex", "[0][1]concat=n=2:v=1:a=0"]
+    for name, codec in (("clip.webm", ["-c:v", "libvpx-vp9", "-b:v", "200k"]),
+                        ("clip.mp4", ["-c:v", "libx264", "-pix_fmt", "yuv420p"])):
+        out = folder / name
+        made = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *src,
+                               *codec, str(out)], capture_output=True, timeout=120)
+        if made.returncode == 0 and out.exists():
+            return out
+    return None
+
+
+def browser_video_selftest(check) -> None:
+    chrome = find_chrome()
+    if not chrome:
+        return                              # browser_selftest has said so already
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        clip = video_fixture(tmp)
+        if not clip:
+            print("skip: the video cases in the browser need ffmpeg with libvpx-vp9 or libx264")
+            return
+        sess = tmp / "sess"
+        sess.mkdir()
+        draft = tmp / "draft.md"
+        draft.write_text(FIXTURE_DRAFT)
+        broken = tmp / "broken.mp4"         # what a browser gets when nothing could convert it
+        broken.write_bytes(os.urandom(4096))
+        with contextlib.redirect_stderr(io.StringIO()):
+            items = stage_inputs([clip, draft], sess)
+            orig_which = shutil.which
+            shutil.which = lambda cmd: None if cmd in ("ffprobe", "ffmpeg") else orig_which(cmd)
+            try:
+                tail = stage_inputs([broken], tmp / "sess-broken")[0]
+            finally:
+                shutil.which = orig_which
+        # Staged in a second session, so it carries the next id here, and its file is moved in.
+        tail = dict(tail, id="d3", asset="d3_broken", url="/asset/d3_broken.mp4")
+        shutil.copy2(tmp / "sess-broken" / "assets" / "d1_broken.mp4",
+                     sess / "assets" / "d3_broken.mp4")
+        items.append(tail)
+        (sess / "items.json").write_text(json.dumps(items))
+        saved = {"seq": 2, "overall": "", "comments": [], "marks": [
+            {"id": 1, "item": "d1", "tool": "span", "note": "restored span", "t": 0.25,
+             "t_end": 0.75},
+            {"id": 2, "item": "d1", "tool": "rect", "note": "restored box", "t": 0.35,
+             "x0": 0.1, "y0": 0.1, "x1": 0.4, "y1": 0.2, "path": []}]}
+        run_in_chrome(chrome, sess, items, TEST_VIDEO_JS, tmp, check, draft=saved,
+                      label="video-")
 
 
 def main() -> int:
