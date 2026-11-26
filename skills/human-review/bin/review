@@ -2803,6 +2803,10 @@ window.__TEST__ = async (api) => {
         !!orphanBatch && typeof orphanBatch === "object", true);
     say("and travels with the overall note",
         orphanBatch && typeof orphanBatch === "object" ? orphanBatch.note.includes("from a picture") : null, true);
+    say("and is not also sent as a note at 0:00 of the video",
+        orphanBatch && typeof orphanBatch === "object"
+          ? (orphanBatch.pages.find(p => p.item === "d1")?.comments || []).some(c => c.id === "m_806")
+          : null, false);
     api.marks.length = 0;
 
     await until(() => broken.sayEl.textContent.length > 0, 8000);

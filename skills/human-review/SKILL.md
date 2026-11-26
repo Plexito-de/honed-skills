@@ -58,7 +58,7 @@ skills/human-review/bin/review poll --session <id>               # blocks until 
 skills/human-review/bin/review poll --ack                        # clears the batch you handled
 skills/human-review/bin/review status                            # is a batch waiting
 skills/human-review/bin/review close                             # stop a review nobody sends
-skills/human-review/bin/review selftest [--browser]              # 163 offline cases, 189 more in Chrome (wide and phone)
+skills/human-review/bin/review selftest [--browser]              # 163 offline cases, 191 more in Chrome (wide and phone)
 ```
 
 1. Write or render the draft.
